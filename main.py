@@ -131,6 +131,18 @@ def _collection_format_text(playname, guest_name, collection_items):
     return "\n\n".join(texts)
 
 
+def _parse_cleanup_whitelist(text):
+    text = str(text or "").strip()
+    if text == "无":
+        return []
+    whitelist = []
+    for item in re.split(r"[/、，,\s]+", text):
+        item = item.strip()
+        if item.isdigit() and item not in whitelist:
+            whitelist.append(item)
+    return whitelist
+
+
 def _sync_plugin_from_github():
     target_dir = os.path.dirname(os.path.abspath(__file__))
     branch = os.environ.get("AMOURGAME_GITHUB_BRANCH", "main")
@@ -6988,7 +7000,7 @@ def reply(plugin_event, Proc, is_group):
             f"{replace_playname} 小群催戏\n\n【注意】\n每隔2秒逐个向未结小群催戏，若未结群数量巨大，请谨慎使用以防风险检测。",
             f"{replace_playname} 个人群催戏\n\n【注意】\n每隔2秒逐个向嘉宾个人群催戏。",
             f"一键催戏 {replace_playname}\n\n【说明】\n只提醒超过设置时长的小群。尚未开戏时提醒全部参与者；已经开戏时提醒当前待回戏者，并按人向个人群发送一条待处理小群汇总。\n默认催5h以上未回的小群，可使用「设置催戏 {replace_playname} 时长」指令修改，时长为小时数，支持小数。",
-            f"{replace_playname} 一键收群\n{replace_playname} 检测小群\n{replace_playname} 提醒退群\n{replace_playname} 踢出小群\n\n【说明】\n一键收群：释放本恋综所有未释放小群，并在释放后艾特该小群所有嘉宾/NPC。\n检测小群：检测该恋综备用池中所有空闲小群，列出仍留在群内的普通成员。\n提醒退群：向这些普通成员发送退群提醒。\n踢出小群：将这些普通成员移出小群；不会踢群主或管理员。",
+            f"{replace_playname} 一键收群\n{replace_playname} 检测小群\n{replace_playname} 提醒退群\n{replace_playname} 踢出小群\n{replace_playname} 设置小群白名单 QQ1 QQ2\n{replace_playname} 设置小群白名单 无\n\n【说明】\n一键收群：释放本恋综所有未释放小群，并在释放后艾特该小群所有嘉宾/NPC。\n检测小群：检测该恋综备用池中所有空闲小群，列出仍留在群内的普通成员。\n提醒退群：向这些普通成员发送退群提醒。\n踢出小群：将这些普通成员移出小群；不会踢群主、管理员或白名单成员。\n设置小群白名单：重复发送会覆盖；填写“无”会清空白名单。",
             f"{replace_playname} 数量\n\n【说明】\n查看今日全体互动数据。\n每天10点、15点、20点、23点59分，自动在公告群播报。",
             f"删除私约/电话/前置电话/官约/微信+编号\n\n【说明】\n指令中无需+号。\n删除并释放小群+删除时间线。\n删除后会通知至个人群。",
             f"添加时间线：{replace_playname} 嘉宾/NPC姓名 私约/电话/前置电话/官约/微信/心愿 Dx 07:00-23:59\n\n【说明】\n添加后不会创建小群、并默认已结。\n添加的时间线不会计入公告的小群数量。\n添加后会通知至个人群。",
@@ -7030,12 +7042,12 @@ def reply(plugin_event, Proc, is_group):
             ("使用说明", list(range(0, 2))),
             ("互动限制与掉落", list(range(2, 8))),
             ("嘉宾与个人群", list(range(8, 13))),
-            ("催戏与数据查询", list(range(13, 18)) + [35, 36]),
+            ("催戏与数据查询", [13] + list(range(15, 18)) + [35, 36]),
             ("删除预约、时间线", list(range(18, 22)) + [32]),
             ("前置电话与官约", list(range(22, 27))),
             ("公知、收集项与关系线", list(range(27, 32))),
             ("补戏、日程与地点", [33, 34] + list(range(37, 40))),
-            ("备用小群池", list(range(40, 44))),
+            ("备用小群池", [14] + list(range(40, 44))),
             ("导出与数据维护", list(range(44, 48))),
             ("自动出场及游戏", list(range(48, 52))),
             ("技术支持", [53]),
@@ -9176,6 +9188,33 @@ def reply(plugin_event, Proc, is_group):
                 reply_msg += f"\n等{len(failed_groups)}个"
         plugin_event.reply(reply_msg)
 
+    elif re.match(r"(\S+)\s*设置小群白名单\s+(.+)", message):
+        match = re.match(r"(\S+)\s*设置小群白名单\s+(.+)", message)
+        if not match:
+            return
+        playname = match.group(1)
+        whitelist = _parse_cleanup_whitelist(match.group(2))
+        if uid not in masterlist:
+            plugin_event.reply("权限不足，仅骰主可执行此操作")
+            return
+        register = getData("groupcollection", "register.json")
+        if playname not in register:
+            plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+            return
+        data = register[playname]
+        manage_group = data.get("manage_group")
+        if groupid != manage_group:
+            plugin_event.reply(f"请在恋综「{playname}」的后台群中设置小群白名单！")
+            return
+        register[playname]["cleanup_whitelist"] = whitelist
+        setData("groupcollection", "register.json", register)
+        if whitelist:
+            plugin_event.reply(
+                f"恋综「{playname}」小群白名单已设置为：{'、'.join(whitelist)}"
+            )
+        else:
+            plugin_event.reply(f"恋综「{playname}」小群白名单已清空。")
+
     elif re.match(r"(\S+)\s*(检测小群|清理小群|提醒退群|踢出小群)$", message):
         match = re.match(r"(\S+)\s*(检测小群|清理小群|提醒退群|踢出小群)$", message)
         if not match:
@@ -9207,6 +9246,8 @@ def reply(plugin_event, Proc, is_group):
         )
         dirty_groups = []
         failed_groups = []
+        whitelist = set(str(item) for item in data.get("cleanup_whitelist", []))
+        ignored_whitelist_count = 0
         bot_id = str(plugin_event.bot_info.id)
         for group_info in pool_groups:
             target_group_id = group_info["group_id"]
@@ -9218,6 +9259,9 @@ def reply(plugin_event, Proc, is_group):
             for member in members:
                 member_id = str(member.get("user_id", ""))
                 if member_id == bot_id:
+                    continue
+                if member_id in whitelist:
+                    ignored_whitelist_count += 1
                     continue
                 if member.get("role") != "member":
                     continue
@@ -9277,6 +9321,7 @@ def reply(plugin_event, Proc, is_group):
                     f"恋综「{playname}」空闲小群{action}结果\n"
                     f"检测小群：{len(pool_groups)}个\n"
                     f"存在普通成员：{len(dirty_groups)}个\n"
+                    f"忽略白名单成员：{ignored_whitelist_count}人\n"
                     f"检测失败：{len(failed_groups)}个"
                 ),
             }
@@ -9318,6 +9363,7 @@ def reply(plugin_event, Proc, is_group):
             reply_msg = (
                 f"恋综「{playname}」空闲小群{action}完成。\n"
                 f"存在普通成员：{len(dirty_groups)}个\n"
+                f"忽略白名单成员：{ignored_whitelist_count}人\n"
                 f"检测失败：{len(failed_groups)}个"
             )
             if action == "提醒退群":
