@@ -1,0 +1,22 @@
+{
+  "name": "AmourGameV2_0",
+  "author": "临皋闲人、反季节生物",
+  "namespace": "AmourGameV2_0",
+  "info": "普恋插件集成版，与非普功能不冲突。发送“恋综@bot”获得指引。",
+  "priority": 30000,
+  "svn": 1,
+  "compatible_svn": 100,
+  "message_mode": "olivos_string",
+  "support": [
+    {
+      "sdk": "onebot",
+      "platform": "qq",
+      "model": "all"
+    },
+    {
+      "sdk": "all",
+      "platform": "all",
+      "model": "all"
+    }
+  ]
+}
