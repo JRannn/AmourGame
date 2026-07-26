@@ -177,10 +177,10 @@ def _run_update_sync(plugin_event, Proc):
     def _worker():
         global UPDATE_SYNC_IN_PROGRESS
         try:
-            _sync_plugin_from_github()
-            Proc.set_restart()
+            _sync_plugin_from_github()            
             try:
                 plugin_event.reply("同步完成，已更新到本地当前插件目录，正在重载插件。")
+                Proc.set_restart()
             except Exception:
                 pass
         except Exception as exc:
