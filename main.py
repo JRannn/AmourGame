@@ -895,6 +895,54 @@ def reply(plugin_event, Proc, is_group):
     engagement_module.monitor_appointment_message(
         plugin_event, message, uid, groupid
     )
+    collection_format_match = re.fullmatch(
+        r"(.+?)(?:\s*\[OP:at,id=(\d+)\])\s*",
+        str(message).strip(),
+    )
+    if collection_format_match:
+        requested_collection_item = collection_format_match.group(1).strip()
+        at_id = collection_format_match.group(2)
+        privategroup = getData("groupcollection", "privategroup.json")
+        register = getData("groupcollection", "register.json")
+        matched_playnames = []
+        matched_guest_names = []
+        if privategroup:
+            for playname, guests in privategroup.items():
+                for uid_str, guest_info in guests.items():
+                    if str(uid) != uid_str:
+                        continue
+                    personal_group = guest_info.get("个人群号")
+                    npc_group = guest_info.get("NPC群号")
+                    if str(groupid) in (str(personal_group), str(npc_group)):
+                        guest_name = (
+                            guest_info.get("嘉宾姓名")
+                            or guest_info.get("NPC姓名")
+                            or "嘉宾姓名"
+                        )
+                        matched_playnames.append(playname)
+                        matched_guest_names.append(guest_name)
+        if not matched_playnames:
+            for playname, reg_data in register.items():
+                if str(reg_data.get("manage_group")) == str(groupid):
+                    matched_playnames.append(playname)
+                    matched_guest_names.append("嘉宾姓名")
+        if (not at_id or at_id == str(plugin_event.bot_info.id)) and (
+            at_id or matched_playnames
+        ):
+            replace_playname = matched_playnames[-1] if matched_playnames else "恋综名"
+            replace_guest_name = (
+                matched_guest_names[-1] if matched_guest_names else "嘉宾姓名"
+            )
+            collection_items = _get_collection_items(register, replace_playname)
+            if requested_collection_item in collection_items:
+                plugin_event.reply(
+                    _collection_format_text(
+                        replace_playname,
+                        replace_guest_name,
+                        [requested_collection_item],
+                    )
+                )
+                return
     format_match = re.fullmatch(
         r"(心动信|小纸条|礼物|短信|送图|心愿|点歌|关系线|留言板|公知|私约|电话|前置电话|微信|官约)"
         r"(?:\s*\[OP:at,id=(\d+)\])?\s*",
@@ -6405,6 +6453,10 @@ def reply(plugin_event, Proc, is_group):
             letters = getData("sendmessage", "letters.json")
             gifts = getData("sendmessage", "gifts.json")
             notes = getData("sendmessage", "notes.json")
+            arc_records = getData(
+                _monitor_record_namespace(playname),
+                _monitor_arc_filename(playname),
+            )
 
             def init_guest_stats():
                 return {
@@ -6419,6 +6471,21 @@ def reply(plugin_event, Proc, is_group):
                     "send": {"礼物": 0, "短信": 0, "小纸条": 0, "心动信": 0},
                     "receive": {"礼物": 0, "短信": 0, "小纸条": 0, "心动信": 0},
                 }
+
+            def format_guest_arc(uid):
+                user_stats = arc_records.get(str(uid), {})
+                count = int(user_stats.get("response_count", 0) or 0)
+                rounds = int(user_stats.get("rounds", 0) or 0)
+                total_words = int(user_stats.get("word_count", 0) or 0)
+                if not count and not rounds and not total_words:
+                    return "平均弧长：暂无有效记录\n记录回合：0", False
+                average_hours = (
+                    round(int(user_stats.get("total_minutes", 0) or 0) / count / 60, 1)
+                    if count
+                    else 0
+                )
+                average_words = round(total_words / rounds) if rounds else 0
+                return f"平均弧长：{average_hours}h/{average_words}字\n记录回合：{rounds}", True
 
             all_guests_stats = {}
             for guest_uid in privategroup[playname].keys():
@@ -6496,6 +6563,7 @@ def reply(plugin_event, Proc, is_group):
                     guest_number = guest_info.get("NPC编号", 0)
                     guest_name = guest_info.get("NPC姓名", guest_name)
                     is_npc = True
+                arc_text, has_arc_data = format_guest_arc(guest_uid)
                 guests_list.append(
                     {
                         "uid": guest_uid,
@@ -6503,6 +6571,8 @@ def reply(plugin_event, Proc, is_group):
                         "name": guest_name,
                         "is_npc": is_npc,
                         "stats": all_guests_stats[guest_uid],
+                        "arc_text": arc_text,
+                        "has_arc_data": has_arc_data,
                     }
                 )
             guests_list.sort(
@@ -6512,7 +6582,7 @@ def reply(plugin_event, Proc, is_group):
                 guest_name = guest["name"]
                 guest_stats = guest["stats"]
                 is_npc = guest["is_npc"]
-                has_any_data = False
+                has_any_data = guest["has_arc_data"]
                 for day_stats in guest_stats.values():
                     for count in day_stats["playtype_counts"].values():
                         if count > 0:
@@ -6531,7 +6601,7 @@ def reply(plugin_event, Proc, is_group):
                 if not has_any_data:
                     continue
                 display_name = f"{guest_name}（NPC）" if is_npc else guest_name
-                content_text = f"{playname} {display_name}统计\n"
+                content_text = f"{playname} {display_name}统计\n{guest['arc_text']}\n"
                 sorted_days = sorted(guest_stats.keys(), key=lambda x: int(x))
                 for virtual_day in sorted_days:
                     day_stats = guest_stats[virtual_day]
@@ -6875,6 +6945,12 @@ def reply(plugin_event, Proc, is_group):
                             )
                             matched_playnames.append(playname)
                             matched_guest_names.append(guest_name)
+            register = getData("groupcollection", "register.json")
+            if not matched_playnames:
+                for playname, reg_data in register.items():
+                    if str(reg_data.get("manage_group")) == str(groupid):
+                        matched_playnames.append(playname)
+                        matched_guest_names.append("嘉宾姓名")
             if matched_playnames:
                 replace_playname = matched_playnames[-1]
                 replace_guest_name = matched_guest_names[-1]
@@ -6888,14 +6964,16 @@ def reply(plugin_event, Proc, is_group):
                 replace_receiver = "李四"
                 replace_guest_name = "嘉宾姓名"
             arc_time, arc_words = _monitor_arc_settings(replace_playname)
-            register = getData("groupcollection", "register.json")
             collection_items = _get_collection_items(register, replace_playname)
+            collection_command_text = "/".join(
+                f"{item}@骰子" for item in collection_items
+            )
             collection_formats = _collection_format_text(
                 replace_playname, replace_guest_name, collection_items
             )
             nodes_data = []
             format_texts = [
-                f"发送「心动信/小纸条/礼物/短信/送图/心愿/点歌/关系线/留言板/公知/私约/电话/官约/微信@骰子」可快速获得单独的格式。\n\n录入个人群后则不需要@骰子；格式自动填充恋综名、嘉宾姓名。\n本场收集项格式见下方。",
+                f"发送「心动信/小纸条/礼物/短信/送图/心愿/点歌/关系线/留言板/私约/电话/官约/微信@骰子」可快速获得单独的格式。\n收集项格式：{collection_command_text}\n\n录入个人群后则不需要@骰子；格式自动填充恋综名、嘉宾姓名。\n本场收集项格式见下方。",
                 f"没写「可为空」的地方不可留白，可以打个符号。\n\n署名不要求写真名。\n\n心动信/小纸条/礼物/短信/留言板均可带图。",
                 f"发送「创建预约」可快速获得开群格式（未填充版）。",
                 f"{replace_playname} 心动信\n{replace_sender} 致 {replace_receiver}\n内容：\n署名：",
@@ -7000,7 +7078,6 @@ def reply(plugin_event, Proc, is_group):
             f"{replace_playname} 小群催戏\n\n【注意】\n每隔2秒逐个向未结小群催戏，若未结群数量巨大，请谨慎使用以防风险检测。",
             f"{replace_playname} 个人群催戏\n\n【注意】\n每隔2秒逐个向嘉宾个人群催戏。",
             f"一键催戏 {replace_playname}\n\n【说明】\n只提醒超过设置时长的小群。尚未开戏时提醒全部参与者；已经开戏时提醒当前待回戏者，并按人向个人群发送一条待处理小群汇总。\n默认催5h以上未回的小群，可使用「设置催戏 {replace_playname} 时长」指令修改，时长为小时数，支持小数。",
-            f"{replace_playname} 一键收群\n{replace_playname} 检测小群\n{replace_playname} 提醒退群\n{replace_playname} 踢出小群\n{replace_playname} 设置小群白名单 QQ1 QQ2\n{replace_playname} 设置小群白名单 无\n\n【说明】\n一键收群：释放本恋综所有未释放小群，并在释放后艾特该小群所有嘉宾/NPC。\n检测小群：检测该恋综备用池中所有空闲小群，列出仍留在群内的普通成员。\n提醒退群：向这些普通成员发送退群提醒。\n踢出小群：将这些普通成员移出小群；不会踢群主、管理员或白名单成员。\n设置小群白名单：重复发送会覆盖；填写“无”会清空白名单。",
             f"{replace_playname} 数量\n\n【说明】\n查看今日全体互动数据。\n每天10点、15点、20点、23点59分，自动在公告群播报。",
             f"删除私约/电话/前置电话/官约/微信+编号\n\n【说明】\n指令中无需+号。\n删除并释放小群+删除时间线。\n删除后会通知至个人群。",
             f"添加时间线：{replace_playname} 嘉宾/NPC姓名 私约/电话/前置电话/官约/微信/心愿 Dx 07:00-23:59\n\n【说明】\n添加后不会创建小群、并默认已结。\n添加的时间线不会计入公告的小群数量。\n添加后会通知至个人群。",
@@ -7028,6 +7105,7 @@ def reply(plugin_event, Proc, is_group):
             f"登记默认/{replace_playname}群号\n群号1\n群号2",
             f"删除默认/{replace_playname}群号\n群号1\n群号2",
             f"清空默认/{replace_playname}群号",
+            f"{replace_playname} 一键收群\n{replace_playname} 检测小群\n{replace_playname} 提醒退群\n{replace_playname} 踢出小群\n{replace_playname} 设置小群白名单 QQ1 QQ2\n{replace_playname} 设置小群白名单 无\n\n【说明】\n一键收群：释放本恋综所有未释放小群，并在释放后艾特该小群所有嘉宾/NPC。\n检测小群：检测该恋综备用池中所有空闲小群，列出仍留在群内的非白名单成员。\n提醒退群：向这些非白名单成员发送退群提醒。\n踢出小群：将这些非白名单成员移出小群；不会踢机器人或白名单成员。\n设置小群白名单：重复发送会覆盖；填写“无”会清空白名单。",
             f"导出{replace_playname}复盘\n\n【说明】\n复盘压缩包将会上传至后台群，不复盘关系线。",
             f"注销恋综@骰子\n\n【注意】\n避免数据积压，结束后及时注销。\n当一个群为多个恋综的后台群时，自动注销最后一个注册的恋综。",
             f"修正所有恋综数据\n\n【注意】\n在没有进行任何恋综时使用，清理所有坏数据。",
@@ -7042,12 +7120,12 @@ def reply(plugin_event, Proc, is_group):
             ("使用说明", list(range(0, 2))),
             ("互动限制与掉落", list(range(2, 8))),
             ("嘉宾与个人群", list(range(8, 13))),
-            ("催戏与数据查询", [13] + list(range(15, 18)) + [35, 36]),
-            ("删除预约、时间线", list(range(18, 22)) + [32]),
-            ("前置电话与官约", list(range(22, 27))),
-            ("公知、收集项与关系线", list(range(27, 32))),
-            ("补戏、日程与地点", [33, 34] + list(range(37, 40))),
-            ("备用小群池", [14] + list(range(40, 44))),
+            ("催戏与数据查询", list(range(13, 17)) + [34, 35]),
+            ("删除预约、时间线", list(range(17, 21)) + [31]),
+            ("前置电话与官约", list(range(21, 26))),
+            ("公知、收集项与关系线", list(range(26, 31))),
+            ("补戏、日程与地点", [32, 33] + list(range(36, 39))),
+            ("备用小群池", list(range(39, 44))),
             ("导出与数据维护", list(range(44, 48))),
             ("自动出场及游戏", list(range(48, 52))),
             ("技术支持", [53]),
@@ -9263,11 +9341,10 @@ def reply(plugin_event, Proc, is_group):
                 if member_id in whitelist:
                     ignored_whitelist_count += 1
                     continue
-                if member.get("role") != "member":
-                    continue
                 display_name = (
                     member.get("card")
                     or member.get("nickname")
+                    or member.get("name")
                     or member_id
                 )
                 normal_members.append(
@@ -9320,7 +9397,7 @@ def reply(plugin_event, Proc, is_group):
                 "content_text": (
                     f"恋综「{playname}」空闲小群{action}结果\n"
                     f"检测小群：{len(pool_groups)}个\n"
-                    f"存在普通成员：{len(dirty_groups)}个\n"
+                    f"存在非白名单成员：{len(dirty_groups)}个\n"
                     f"忽略白名单成员：{ignored_whitelist_count}人\n"
                     f"检测失败：{len(failed_groups)}个"
                 ),
@@ -9333,7 +9410,7 @@ def reply(plugin_event, Proc, is_group):
                     "content_text": (
                         f"群号：{item['group_id']}\n"
                         f"来源：{item['source'] or '未知'}\n"
-                        f"普通成员：\n" + "\n".join(member["display"] for member in item["members"])
+                        f"非白名单成员：\n" + "\n".join(member["display"] for member in item["members"])
                     ),
                 }
             )
@@ -9362,7 +9439,7 @@ def reply(plugin_event, Proc, is_group):
         if result.get("retcode") != 0:
             reply_msg = (
                 f"恋综「{playname}」空闲小群{action}完成。\n"
-                f"存在普通成员：{len(dirty_groups)}个\n"
+                f"存在非白名单成员：{len(dirty_groups)}个\n"
                 f"忽略白名单成员：{ignored_whitelist_count}人\n"
                 f"检测失败：{len(failed_groups)}个"
             )
