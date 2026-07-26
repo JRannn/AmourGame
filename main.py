@@ -6601,7 +6601,7 @@ def reply(plugin_event, Proc, is_group):
                 if not has_any_data:
                     continue
                 display_name = f"{guest_name}（NPC）" if is_npc else guest_name
-                content_text = f"{playname} {display_name}统计\n{guest['arc_text']}\n"
+                content_text = f"【{display_name}】\n{guest['arc_text']}\n-\n"
                 sorted_days = sorted(guest_stats.keys(), key=lambda x: int(x))
                 for virtual_day in sorted_days:
                     day_stats = guest_stats[virtual_day]
@@ -6630,16 +6630,16 @@ def reply(plugin_event, Proc, is_group):
                         if count > 0:
                             send_parts.append(f"{item_type}{count}")
                     if send_parts:
-                        day_parts.append(f"【发】{''.join(send_parts)}")
+                        day_parts.append(f"[发]{''.join(send_parts)}")
                     receive_parts = []
                     for item_type, count in day_stats["receive"].items():
                         if count > 0:
                             receive_parts.append(f"{item_type}{count}")
                     if receive_parts:
-                        day_parts.append(f"【收】{''.join(receive_parts)}")
+                        day_parts.append(f"[收]{''.join(receive_parts)}")
                     if day_parts:
-                        content_text += "，".join(day_parts) + "\n"
-                if content_text.strip() == f"{playname} {display_name}统计":
+                        content_text += "，".join(day_parts) + "\n-\n"
+                if content_text.strip() == f"【{display_name}】":
                     continue
                 nodes_data.append(
                     {"bot_id": bot_id, "content_text": content_text.strip()}
