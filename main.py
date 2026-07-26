@@ -156,7 +156,7 @@ def _sync_plugin_from_github():
                 shutil.copyfileobj(src, dst)
 
 
-def _run_update_sync(plugin_event):
+def _run_update_sync(plugin_event, Proc):
     global UPDATE_SYNC_IN_PROGRESS
     if UPDATE_SYNC_IN_PROGRESS:
         try:
@@ -178,8 +178,9 @@ def _run_update_sync(plugin_event):
         global UPDATE_SYNC_IN_PROGRESS
         try:
             _sync_plugin_from_github()
+            Proc.set_restart()
             try:
-                plugin_event.reply("同步完成，已更新到本地当前插件目录。")
+                plugin_event.reply("同步完成，已更新到本地当前插件目录，正在重载插件。")
             except Exception:
                 pass
         except Exception as exc:
@@ -328,7 +329,7 @@ def should_dispatch_game(plugin_event, is_group):
 def dispatch_game_event(plugin_event, Proc, is_group):
     message = str(getattr(plugin_event.data, "message", "")).strip()
     if _is_update_command(message):
-        return _run_update_sync(plugin_event)
+        return _run_update_sync(plugin_event, Proc)
     if not should_dispatch_game(plugin_event, is_group):
         return False
     try:
@@ -483,6 +484,111 @@ def get_group_member_list(plugin_event, group_id):
         pass
 
 
+def get_group_member_detail_list(plugin_event, group_id):
+    try:
+        bot_port = plugin_event.bot_info.post_info.port
+        bot_token = plugin_event.bot_info.post_info.access_token
+        url = f"http://127.0.0.1:{bot_port}/get_group_member_list"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {bot_token}",
+        }
+        payload = json.dumps({"group_id": int(group_id)})
+        response = requests.post(url, headers=headers, data=payload, timeout=10)
+        result = response.json()
+        if result.get("retcode") == 0 and "data" in result:
+            return result["data"]
+        return None
+    except Exception:
+        return None
+
+
+def kick_group_member(plugin_event, group_id, user_id):
+    try:
+        bot_port = plugin_event.bot_info.post_info.port
+        bot_token = plugin_event.bot_info.post_info.access_token
+        url = f"http://127.0.0.1:{bot_port}/set_group_kick"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {bot_token}",
+        }
+        payload = json.dumps(
+            {
+                "group_id": int(group_id),
+                "user_id": int(user_id),
+                "reject_add_request": False,
+            }
+        )
+        response = requests.post(url, headers=headers, data=payload, timeout=10)
+        result = response.json()
+        return result.get("retcode") == 0, result.get("message") or result.get("msg", "")
+    except Exception as e:
+        return False, str(e)
+
+
+def _get_pool_group_file(playname, use_default=False):
+    groupnum_base_path = "./data/images/恋综备用群/群号"
+    playname_file = os.path.join(groupnum_base_path, f"{playname}.json")
+    default_file = os.path.join(groupnum_base_path, "默认池.json")
+    if not use_default and os.path.exists(playname_file):
+        return playname_file
+    if os.path.exists(default_file):
+        return default_file
+    return None
+
+
+def _get_pool_qrcode_path(playname, use_default=False):
+    qrcode_base_path = "./data/images/恋综备用群/二维码"
+    playname_path = os.path.join(qrcode_base_path, playname)
+    default_path = os.path.join(qrcode_base_path, "默认池")
+    if not use_default and os.path.exists(playname_path) and os.path.isdir(playname_path):
+        return playname_path
+    if os.path.exists(default_path) and os.path.isdir(default_path):
+        return default_path
+    return None
+
+
+def _unused_pool_groups(playname, play_method):
+    groups = []
+    if play_method == "二维码":
+        group_path = _get_pool_qrcode_path(playname)
+        if not group_path:
+            return groups
+        mapping_file = os.path.join(group_path, "二维码与群号对应组.json")
+        if not os.path.exists(mapping_file):
+            return groups
+        try:
+            with open(mapping_file, "r", encoding="utf-8") as f:
+                mapping_data = json.load(f)
+        except Exception:
+            return groups
+        for filename in os.listdir(group_path):
+            file_path = os.path.join(group_path, filename)
+            if not os.path.isfile(file_path):
+                continue
+            if filename.lower().endswith(".json") or filename.startswith("已占用_"):
+                continue
+            group_id = mapping_data.get(filename)
+            if not group_id:
+                name_without_ext = os.path.splitext(filename)[0]
+                group_id = mapping_data.get(name_without_ext)
+            if group_id:
+                groups.append({"group_id": str(group_id), "source": filename})
+    elif play_method == "群号":
+        group_file = _get_pool_group_file(playname)
+        if not group_file:
+            return groups
+        try:
+            with open(group_file, "r", encoding="utf-8") as f:
+                group_data = json.load(f)
+        except Exception:
+            return groups
+        for group_id, group_info in group_data.items():
+            if isinstance(group_info, dict) and group_info.get("使用情况") is False:
+                groups.append({"group_id": str(group_id), "source": os.path.basename(group_file)})
+    return groups
+
+
 def auto_release_group(plugin_event, Proc):
     group_id = str(plugin_event.data.group_id)
     left_member_id = str(plugin_event.data.user_id)
@@ -544,10 +650,30 @@ def cleanup_monitor_session(group_id, code=None):
         setData("engagement", "msg_appoint.json", states)
 
 
-def release_group_with_code(plugin_event, code, appointment):
-    group_id = str(plugin_event.data.group_id)
+def _appointment_participant_ids(appointment):
+    participant_ids = []
+    inviter = appointment.get("inviter")
+    invitee = appointment.get("invitee", [])
+    if isinstance(inviter, list):
+        for item in inviter:
+            item = str(item)
+            if item.isdigit() and item not in participant_ids:
+                participant_ids.append(item)
+    elif inviter != "官方":
+        inviter = str(inviter)
+        if inviter.isdigit() and inviter not in participant_ids:
+            participant_ids.append(inviter)
+    for item in invitee:
+        item = str(item)
+        if item.isdigit() and item not in participant_ids:
+            participant_ids.append(item)
+    return participant_ids
+
+
+def release_group_with_code(plugin_event, code, appointment, group_id=None, reply=True):
+    group_id = str(group_id or plugin_event.data.group_id)
     if str(appointment.get("group", "")) != group_id:
-        return
+        return False
     playname = appointment.get("playname")
     playtype = appointment.get("playtype")
     playtime = appointment.get("playtime")
@@ -566,7 +692,7 @@ def release_group_with_code(plugin_event, code, appointment):
             group_path = default_path
         mapping_file = os.path.join(group_path, "二维码与群号对应组.json")
         if not os.path.exists(mapping_file):
-            return
+            return False
         try:
             with open(mapping_file, "r", encoding="utf-8") as f:
                 mapping_data = json.load(f)
@@ -576,15 +702,17 @@ def release_group_with_code(plugin_event, code, appointment):
                     qr_filename = qr_name
                     break
             if not qr_filename:
-                plugin_event.reply(f"未找到群号{group_id}对应的二维码文件")
-                return
+                if reply:
+                    plugin_event.reply(f"未找到群号{group_id}对应的二维码文件")
+                return False
             occupied_files = []
             for filename in os.listdir(group_path):
                 if filename.startswith("已占用_") and qr_filename in filename:
                     occupied_files.append(filename)
             if not occupied_files:
-                plugin_event.reply(f"未找到已占用的二维码文件: {qr_filename}")
-                return
+                if reply:
+                    plugin_event.reply(f"未找到已占用的二维码文件: {qr_filename}")
+                return False
             occupied_file = occupied_files[0]
             original_filename = occupied_file.replace("已占用_", "", 1)
             old_file_path = os.path.join(group_path, occupied_file)
@@ -593,15 +721,17 @@ def release_group_with_code(plugin_event, code, appointment):
                 if os.path.exists(old_file_path):
                     os.rename(old_file_path, new_file_path)
             except OSError as e:
-                plugin_event.reply(f"群二维码释放失败: {e}")
+                if reply:
+                    plugin_event.reply(f"群二维码释放失败: {e}")
             match = re.match(r"(.+)\.\w+$", original_filename)
             if match:
                 new_group_name = match.group(1)
             else:
                 new_group_name = original_filename
         except Exception as e:
-            plugin_event.reply(f"释放二维码文件时出错，请联系管理。")
-            return
+            if reply:
+                plugin_event.reply(f"释放二维码文件时出错，请联系管理。")
+            return False
     elif play_method == "群号":
         with amourlock:
             playname_file = f"./data/images/恋综备用群/群号/{playname}.json"
@@ -612,8 +742,9 @@ def release_group_with_code(plugin_event, code, appointment):
             elif os.path.exists(default_file):
                 group_file = default_file
             if not group_file:
-                plugin_event.reply(f"群号配置文件不存在: {playname}")
-                return
+                if reply:
+                    plugin_event.reply(f"群号配置文件不存在: {playname}")
+                return False
             try:
                 with open(group_file, "r", encoding="utf-8") as f:
                     group_data = json.load(f)
@@ -622,10 +753,12 @@ def release_group_with_code(plugin_event, code, appointment):
                     with open(group_file, "w", encoding="utf-8") as f:
                         json.dump(group_data, f, ensure_ascii=False, indent=2)
                 else:
-                    plugin_event.reply(f"群号{group_id}不在配置文件中！")
+                    if reply:
+                        plugin_event.reply(f"群号{group_id}不在配置文件中！")
             except Exception as e:
-                plugin_event.reply(f"处理群号文件时出错: {e}")
-                return
+                if reply:
+                    plugin_event.reply(f"处理群号文件时出错: {e}")
+                return False
         new_group_name = f"{playname}备用"
     if new_group_name:
         plugin_event.set_group_name(group_id, new_group_name)
@@ -690,7 +823,9 @@ def release_group_with_code(plugin_event, code, appointment):
         del appoint[code]
         setData("engagement", "appoint.json", appoint)
     cleanup_monitor_session(group_id, code)
-    plugin_event.reply(f"如有复盘，文件已生成在后台。\n小群{code}已释放！")
+    if reply:
+        plugin_event.reply(f"如有复盘，文件已生成在后台。\n小群{code}已释放！")
+    return True
 
 
 def vtor(playname):
@@ -1198,8 +1333,7 @@ def reply(plugin_event, Proc, is_group):
                     reply_msg += f"戏群群号：{data.get('play_group', '未设置')}\n"
                     reply_msg += f"发信时间：{send_time}\n"
                     reply_msg += f"记录弧长：{arc_time} {arc_words}\n"
-                    reply_msg += f"备用调用：{data.get('play_method', '未设置')}\n"
-                    reply_msg += f"收集项：{'/'.join(_get_collection_items(register, playname))}\n\n"
+                    reply_msg += f"备用调用：{data.get('play_method', '未设置')}\n\n"
                     if "supplements" in data and data["supplements"]:
                         reply_msg += "补戏信息：\n"
                         for virtual_day, supplement_count in data[
@@ -1221,8 +1355,7 @@ def reply(plugin_event, Proc, is_group):
                 "戏群群号：\n"
                 "发信时间：hh:mm\n"
                 "记录弧长：2:00-10:00 50\n"
-                "备用调用：群号/二维码/不使用\n"
-                "收集项：公知"
+                "备用调用：群号/二维码/不使用"
             )
     elif (
         "恋综名称：" in message
@@ -1232,7 +1365,7 @@ def reply(plugin_event, Proc, is_group):
         and "备用调用：" in message
     ):
         playname_match = re.search(
-            r"恋综名称：(.+?)(?=\n开始时间：|\n结束时间：|\n公告群号：|\n戏群群号：|\n发信时间：|\n备用调用：|\n收集项：|$)",
+            r"恋综名称：(.+?)(?=\n开始时间：|\n结束时间：|\n公告群号：|\n戏群群号：|\n发信时间：|\n备用调用：|$)",
             message,
             re.DOTALL,
         )
@@ -1246,7 +1379,6 @@ def reply(plugin_event, Proc, is_group):
         time_match = re.search(r"发信时间：(\d{2}:\d{2})", message)
         arc_match = re.search(r"记录弧长：([^\r\n]+)", message)
         backup_match = re.search(r"备用调用：(.+)", message)
-        collection_match = re.search(r"收集项：([^\r\n]*)", message)
         error_messages = []
         if not playname_match:
             error_messages.append("恋综名称未找到")
@@ -1320,7 +1452,7 @@ def reply(plugin_event, Proc, is_group):
             error_msg += "\n请重新发送正确格式："
             plugin_event.reply(
                 error_msg
-                + "\n\n恋综名称：\n开始时间：20260101\n结束时间：20260110\n公告群号：\n戏群群号：\n发信时间：hh:mm\n记录弧长：2:00-10:00 50\n备用调用：群号/二维码/不使用\n收集项：公知"
+                + "\n\n恋综名称：\n开始时间：20260101\n结束时间：20260110\n公告群号：\n戏群群号：\n发信时间：hh:mm\n记录弧长：2:00-10:00 50\n备用调用：群号/二维码/不使用"
             )
             return
         playname = playname_match.group(1).strip()
@@ -1333,9 +1465,6 @@ def reply(plugin_event, Proc, is_group):
         send_time = time_match.group(1)
         arc_time, arc_words = arc_setting
         play_method = backup_match.group(1).strip()
-        collection_items = _parse_collection_items(
-            collection_match.group(1) if collection_match else ""
-        )
         manage_group = str(plugin_event.data.group_id)
         time_changed = False
         old_send_time = None
@@ -1379,7 +1508,6 @@ def reply(plugin_event, Proc, is_group):
         elif "play_group" not in register[playname]:
             register[playname]["play_group"] = ""
         register[playname]["play_method"] = play_method
-        register[playname]["collection_items"] = collection_items
         register[playname]["manage_group"] = manage_group
         setData("groupcollection", "register.json", register)
         effective_notice_group = register[playname].get("notice_group", "")
@@ -1403,8 +1531,7 @@ def reply(plugin_event, Proc, is_group):
         reply_msg += f"戏群群号：{effective_play_group if effective_play_group else '未设置'}\n"
         reply_msg += f"发信时间：{send_time}\n"
         reply_msg += f"记录弧长：{arc_time} {arc_words}\n"
-        reply_msg += f"备用调用：{play_method}\n"
-        reply_msg += f"收集项：{'/'.join(collection_items)}\n\n"
+        reply_msg += f"备用调用：{play_method}\n\n"
         if date_changed:
             reply_msg += "检测到日程起止日期已修改，已清空原补戏记录。\n\n"
         reply_msg += f"所有玩法默认开启，按需关闭。\n格式指令：「格式@骰子」\n后台指令：「后台@骰子」"
@@ -6793,6 +6920,29 @@ def reply(plugin_event, Proc, is_group):
                 )
             return
 
+    elif re.match(r"(.+?)设置收集项\s+(.+)", message):
+        match = re.match(r"(.+?)设置收集项\s+(.+)", message)
+        if match:
+            if uid not in masterlist:
+                plugin_event.reply("权限不足，仅骰主权限可设置收集项。")
+                return
+            playname = match.group(1).strip()
+            collection_items = _parse_collection_items(match.group(2))
+            register = getData("groupcollection", "register.json")
+            if playname not in register:
+                plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+                return
+            manage_group = register[playname].get("manage_group")
+            if str(groupid) != str(manage_group):
+                plugin_event.reply(f"请在恋综「{playname}」的后台群中设置收集项。")
+                return
+            register[playname]["collection_items"] = collection_items
+            setData("groupcollection", "register.json", register)
+            plugin_event.reply(
+                f"恋综「{playname}」收集项已设置为：{'/'.join(collection_items)}"
+            )
+            return
+
     elif re.match(r"后台\s*\[OP:at,id=(\d+)\]", message):
         match = re.match(r"后台\s*\[OP:at,id=(\d+)\]", message)
         if not match:
@@ -6838,6 +6988,7 @@ def reply(plugin_event, Proc, is_group):
             f"{replace_playname} 小群催戏\n\n【注意】\n每隔2秒逐个向未结小群催戏，若未结群数量巨大，请谨慎使用以防风险检测。",
             f"{replace_playname} 个人群催戏\n\n【注意】\n每隔2秒逐个向嘉宾个人群催戏。",
             f"一键催戏 {replace_playname}\n\n【说明】\n只提醒超过设置时长的小群。尚未开戏时提醒全部参与者；已经开戏时提醒当前待回戏者，并按人向个人群发送一条待处理小群汇总。\n默认催5h以上未回的小群，可使用「设置催戏 {replace_playname} 时长」指令修改，时长为小时数，支持小数。",
+            f"{replace_playname} 一键收群\n{replace_playname} 检测小群\n{replace_playname} 提醒退群\n{replace_playname} 踢出小群\n\n【说明】\n一键收群：释放本恋综所有未释放小群，并在释放后艾特该小群所有嘉宾/NPC。\n检测小群：检测该恋综备用池中所有空闲小群，列出仍留在群内的普通成员。\n提醒退群：向这些普通成员发送退群提醒。\n踢出小群：将这些普通成员移出小群；不会踢群主或管理员。",
             f"{replace_playname} 数量\n\n【说明】\n查看今日全体互动数据。\n每天10点、15点、20点、23点59分，自动在公告群播报。",
             f"删除私约/电话/前置电话/官约/微信+编号\n\n【说明】\n指令中无需+号。\n删除并释放小群+删除时间线。\n删除后会通知至个人群。",
             f"添加时间线：{replace_playname} 嘉宾/NPC姓名 私约/电话/前置电话/官约/微信/心愿 Dx 07:00-23:59\n\n【说明】\n添加后不会创建小群、并默认已结。\n添加的时间线不会计入公告的小群数量。\n添加后会通知至个人群。",
@@ -6848,6 +6999,7 @@ def reply(plugin_event, Proc, is_group):
             f"发起官约/双选官约 {replace_playname}\n\n【说明】\n与前置电话格式和用法一致，支持嘉宾和NPC；不支持双选多人顺位。发起双选官约返回的格式会自动填充成员姓名，拉取双选官约仅拉取选择结果中的双向选择。\n嘉宾/NPC发送「官约选择」可查看/填写选择，后台发送「查看官约选择 {replace_playname}」可查看汇总。",
             f"录入嘉宾性别 {replace_playname}\n\n【说明】\n获取嘉宾列表，填写后整张表发送回后台群保存。\n。性别可填写任意内容（包括不同身份），“拉取异性随机官约”会按照不同内容进行分组。",
             f"拉取随机官约/拉取异性随机官约 {replace_playname} D0 19:00-20:00\n\n【说明】\n将非NPC嘉宾随机两两配对并创建官约小群。\n“拉取异性随机官约”会根据已录入的嘉宾性别随机配对，未录入性别的嘉宾会被跳过。",
+            f"{replace_playname}设置收集项 公知 收集内容2 收集内容3\n\n【说明】\n设置本场恋综可上传的收集项，即使不填写公知也会自动开启公知收集。\n本指令会覆盖当前收集项；想保留的项目每次都要写上，未写的项目会被关闭。\n关闭不会删除已上传内容，但关闭期间无法通过查看指令查看或上传；重新开启后可继续查看原内容。",
             f"{collection_view_text}\n\n【说明】\n在后台群发送，可查看对应收集项合集与收集进度。\n除公知外，其他收集项仅后台可查看。",
             f"{collection_delete_text}\n\n【说明】\nxxx为嘉宾/NPC姓名。",
             f"{replace_playname} 删除关系线 张三 李四\n\n【说明】\n空格隔开。",
@@ -6878,15 +7030,15 @@ def reply(plugin_event, Proc, is_group):
             ("使用说明", list(range(0, 2))),
             ("互动限制与掉落", list(range(2, 8))),
             ("嘉宾与个人群", list(range(8, 13))),
-            ("催戏与数据查询", list(range(13, 17)) + [33, 34]),
-            ("删除预约、时间线", list(range(17, 21)) + [30]),
-            ("前置电话与官约", list(range(21, 26))),
-            ("公知、收集项与关系线", list(range(26, 30))),
-            ("补戏、日程与地点", [31, 32] + list(range(35, 38))),
-            ("备用小群池", list(range(38, 42))),
-            ("导出与数据维护", list(range(42, 46))),
-            ("自动出场及游戏", list(range(46, 50))),
-            ("技术支持", [51]),
+            ("催戏与数据查询", list(range(13, 18)) + [35, 36]),
+            ("删除预约、时间线", list(range(18, 22)) + [32]),
+            ("前置电话与官约", list(range(22, 27))),
+            ("公知、收集项与关系线", list(range(27, 32))),
+            ("补戏、日程与地点", [33, 34] + list(range(37, 40))),
+            ("备用小群池", list(range(40, 44))),
+            ("导出与数据维护", list(range(44, 48))),
+            ("自动出场及游戏", list(range(48, 52))),
+            ("技术支持", [53]),
         ]
         section_specs[-1] = (
             section_specs[-1][0],
@@ -8963,6 +9115,215 @@ def reply(plugin_event, Proc, is_group):
                     else:  # 留言板、点歌
                         reply_msg = f"已将恋综「{playname}」的{limit_type}限制为日程总计数量{limit_num}，可按需修改。"
             setData("sendmessage", "limit.json", limit_data)
+            plugin_event.reply(reply_msg)
+
+    elif re.match(r"(\S+)\s*一键收群$", message):
+        match = re.match(r"(\S+)\s*一键收群$", message)
+        if not match:
+            return
+        playname = match.group(1)
+        if uid not in masterlist:
+            plugin_event.reply("权限不足，仅骰主可执行此操作")
+            return
+        register = getData("groupcollection", "register.json")
+        if playname not in register:
+            plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+            return
+        data = register[playname]
+        manage_group = data.get("manage_group")
+        if groupid != manage_group:
+            plugin_event.reply(f"请在恋综「{playname}」的后台群中一键收群！")
+            return
+        appoint = getData("engagement", "appoint.json")
+        target_appoints = {}
+        for code, data in appoint.items():
+            group_value = str(data.get("group", ""))
+            if data.get("playname") == playname and group_value.isdigit():
+                target_appoints[code] = data
+        if not target_appoints:
+            plugin_event.reply(f"恋综「{playname}」当前没有任何未释放小群！")
+            return
+        total_groups = len(target_appoints)
+        success_count = 0
+        failed_groups = []
+        plugin_event.reply(
+            f"恋综「{playname}」共有{total_groups}个未释放小群，现在开始一键收群……\n\n请等待成功回执。"
+        )
+        for i, (code, appointment) in enumerate(list(target_appoints.items())):
+            target_group_id = str(appointment.get("group", ""))
+            participant_ids = _appointment_participant_ids(appointment)
+            released = release_group_with_code(
+                plugin_event, code, appointment, group_id=target_group_id, reply=False
+            )
+            if not released:
+                failed_groups.append(f"{code}（{target_group_id}）")
+                continue
+            success_count += 1
+            at_text = " ".join(f"[OP:at,id={qq}]" for qq in participant_ids)
+            notify_text = f"本小群已由后台一键收群释放。"
+            if at_text:
+                notify_text += f"\n\n{at_text}"
+            try:
+                plugin_event.send("group", target_group_id, notify_text)
+            except Exception as e:
+                failed_groups.append(f"{code}（通知失败：{e}）")
+            if i < total_groups - 1:
+                time.sleep(1)
+        reply_msg = f"恋综「{playname}」一键收群完成！\n成功释放：{success_count}/{total_groups}"
+        if failed_groups:
+            reply_msg += f"\n失败/异常：{len(failed_groups)}个\n" + "\n".join(failed_groups[:10])
+            if len(failed_groups) > 10:
+                reply_msg += f"\n等{len(failed_groups)}个"
+        plugin_event.reply(reply_msg)
+
+    elif re.match(r"(\S+)\s*(检测小群|清理小群|提醒退群|踢出小群)$", message):
+        match = re.match(r"(\S+)\s*(检测小群|清理小群|提醒退群|踢出小群)$", message)
+        if not match:
+            return
+        playname = match.group(1)
+        action = match.group(2)
+        if uid not in masterlist:
+            plugin_event.reply("权限不足，仅骰主可执行此操作")
+            return
+        register = getData("groupcollection", "register.json")
+        if playname not in register:
+            plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+            return
+        data = register[playname]
+        manage_group = data.get("manage_group")
+        if groupid != manage_group:
+            plugin_event.reply(f"请在恋综「{playname}」的后台群中{action}！")
+            return
+        play_method = data.get("play_method", "不使用")
+        if play_method not in ["二维码", "群号"]:
+            plugin_event.reply(f"恋综「{playname}」未启用备用群池。")
+            return
+        pool_groups = _unused_pool_groups(playname, play_method)
+        if not pool_groups:
+            plugin_event.reply(f"恋综「{playname}」当前没有可检测的空闲小群。")
+            return
+        plugin_event.reply(
+            f"恋综「{playname}」共有{len(pool_groups)}个空闲小群，现在开始{action}……"
+        )
+        dirty_groups = []
+        failed_groups = []
+        bot_id = str(plugin_event.bot_info.id)
+        for group_info in pool_groups:
+            target_group_id = group_info["group_id"]
+            members = get_group_member_detail_list(plugin_event, target_group_id)
+            if members is None:
+                failed_groups.append(target_group_id)
+                continue
+            normal_members = []
+            for member in members:
+                member_id = str(member.get("user_id", ""))
+                if member_id == bot_id:
+                    continue
+                if member.get("role") != "member":
+                    continue
+                display_name = (
+                    member.get("card")
+                    or member.get("nickname")
+                    or member_id
+                )
+                normal_members.append(
+                    {"id": member_id, "display": f"{display_name}（{member_id}）"}
+                )
+            if normal_members:
+                dirty_groups.append(
+                    {
+                        "group_id": target_group_id,
+                        "source": group_info.get("source", ""),
+                        "members": normal_members,
+                    }
+                )
+            time.sleep(0.3)
+        if not dirty_groups and not failed_groups:
+            plugin_event.reply(
+                f"恋综「{playname}」空闲小群检测完成，未发现普通成员滞留。"
+            )
+            return
+        remind_failed = []
+        kick_success = 0
+        kick_failed = []
+        if action == "提醒退群":
+            for item in dirty_groups:
+                at_text = " ".join(
+                    f"[OP:at,id={member['id']}]" for member in item["members"]
+                )
+                remind_text = (
+                    f"{at_text} 请非管理成员及时退群！"
+                )
+                try:
+                    plugin_event.send("group", item["group_id"], remind_text)
+                except Exception as e:
+                    remind_failed.append(f"{item['group_id']}（{e}）")
+                time.sleep(0.5)
+        elif action == "踢出小群":
+            for item in dirty_groups:
+                for member in item["members"]:
+                    ok, err = kick_group_member(plugin_event, item["group_id"], member["id"])
+                    if ok:
+                        kick_success += 1
+                    else:
+                        kick_failed.append(
+                            f"{item['group_id']} {member['display']}（{err or '未知错误'}）"
+                        )
+                    time.sleep(0.3)
+        nodes_data = [
+            {
+                "bot_id": bot_id,
+                "content_text": (
+                    f"恋综「{playname}」空闲小群{action}结果\n"
+                    f"检测小群：{len(pool_groups)}个\n"
+                    f"存在普通成员：{len(dirty_groups)}个\n"
+                    f"检测失败：{len(failed_groups)}个"
+                ),
+            }
+        ]
+        for item in dirty_groups:
+            nodes_data.append(
+                {
+                    "bot_id": bot_id,
+                    "content_text": (
+                        f"群号：{item['group_id']}\n"
+                        f"来源：{item['source'] or '未知'}\n"
+                        f"普通成员：\n" + "\n".join(member["display"] for member in item["members"])
+                    ),
+                }
+            )
+        if failed_groups:
+            nodes_data.append(
+                {
+                    "bot_id": bot_id,
+                    "content_text": "以下小群检测失败：\n" + "\n".join(failed_groups),
+                }
+            )
+        if remind_failed:
+            nodes_data.append(
+                {
+                    "bot_id": bot_id,
+                    "content_text": "以下小群提醒发送失败：\n" + "\n".join(remind_failed),
+                }
+            )
+        if action == "踢出小群":
+            kick_summary = f"踢出成功：{kick_success}人"
+            if kick_failed:
+                kick_summary += f"\n踢出失败：{len(kick_failed)}人\n" + "\n".join(kick_failed[:20])
+                if len(kick_failed) > 20:
+                    kick_summary += f"\n等{len(kick_failed)}人"
+            nodes_data.append({"bot_id": bot_id, "content_text": kick_summary})
+        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        if result.get("retcode") != 0:
+            reply_msg = (
+                f"恋综「{playname}」空闲小群{action}完成。\n"
+                f"存在普通成员：{len(dirty_groups)}个\n"
+                f"检测失败：{len(failed_groups)}个"
+            )
+            if action == "提醒退群":
+                reply_msg += f"\n提醒失败：{len(remind_failed)}个"
+            elif action == "踢出小群":
+                reply_msg += f"\n踢出成功：{kick_success}人\n踢出失败：{len(kick_failed)}人"
             plugin_event.reply(reply_msg)
 
     elif re.match(r"(\S+)\s*小群催戏$", message):
