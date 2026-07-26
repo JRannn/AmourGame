@@ -1,7 +1,7 @@
 {
-  "name": "AmourGameV2_0",
+  "name": "AmourGame",
   "author": "临皋闲人、反季节生物",
-  "namespace": "AmourGameV2_0",
+  "namespace": "AmourGame",
   "info": "普恋插件集成版，与非普功能不冲突。发送“恋综@bot”获得指引。",
   "priority": 30000,
   "svn": 1,

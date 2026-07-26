@@ -1,2 +1,2 @@
-﻿import AmourGameV2_0.schedule as schedule
+﻿import AmourGame.schedule as schedule
 from . import main

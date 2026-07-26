@@ -7,7 +7,7 @@ import time
 
 def _monitor_core():
     # 延迟导入，避免 main 在加载 engagement 时产生循环导入。
-    from AmourGameV2_0 import main
+    from AmourGame import main
 
     return main
 
@@ -1091,7 +1091,7 @@ def open_engagement(
             existing_times, key=lambda item: (item[0], item[1])
         )
     dlc1 = Proc.database.get_basic_config(
-        "AmourGameV2_0", "dlc1", default_value="0", pkl=False
+        "AmourGame", "dlc1", default_value="0", pkl=False
     )
     if invitee == "随机" and playtype == "电话":
         if dlc1 == "0":
