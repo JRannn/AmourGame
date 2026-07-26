@@ -37,7 +37,6 @@ schedule_started = False
 CURRENT_VERSION = "V2.1.0"
 UPDATE_COMMAND = "更新恋综插件"
 GITHUB_REPO = "JRannn/AmourGame"
-GITHUB_TOKEN = ""
 UPDATE_SYNC_LOCK = threading.Lock()
 UPDATE_SYNC_IN_PROGRESS = False
 
@@ -134,15 +133,9 @@ def _collection_format_text(playname, guest_name, collection_items):
 
 def _sync_plugin_from_github():
     target_dir = os.path.dirname(os.path.abspath(__file__))
-    if not GITHUB_TOKEN:
-        raise RuntimeError("未配置 GitHub token")
     branch = os.environ.get("AMOURGAME_GITHUB_BRANCH", "main")
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-    archive_url = f"https://api.github.com/repos/{GITHUB_REPO}/zipball/{branch}"
-    response = requests.get(archive_url, headers=headers, timeout=180)
+    archive_url = f"https://codeload.github.com/{GITHUB_REPO}/zip/refs/heads/{branch}"
+    response = requests.get(archive_url, timeout=180)
     if response.status_code != 200:
         raise RuntimeError(f"GitHub 拉取失败：{response.status_code} {response.text[:200]}")
 
