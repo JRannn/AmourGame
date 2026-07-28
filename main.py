@@ -34,7 +34,7 @@ amourlock = threading.Lock()
 monitor_lock = threading.Lock()
 plugin_events_cache = []
 schedule_started = False
-CURRENT_VERSION = "V2.1.0"
+CURRENT_VERSION = "V2.1.1"
 UPDATE_COMMAND = "更新恋综插件"
 GITHUB_REPO = "JRannn/AmourGame"
 UPDATE_SYNC_LOCK = threading.Lock()
@@ -4460,25 +4460,15 @@ def reply(plugin_event, Proc, is_group):
                     plugin_event.reply("引用的消息转译失败！")
                     return
                 forward_match = re.search(
-                    r"\[(?:OP|CQ):forward,id=([+-]?\d+)\]", raw_message
+                    r"\[(?:OP|CQ):forward,id=([^,\]]+)\]", raw_message
                 )
                 if forward_match:
                     message_id = forward_match.group(1)
-                    url = f"http://127.0.0.1:{bot_port}/get_forward_msg"
-                    payload = json.dumps({"message_id": message_id})
-                    headers = {
-                        "Authorization": f"Bearer {bot_token}",
-                        "Content-Type": "application/json",
-                    }
-                    response = requests.post(
-                        url, headers=headers, data=payload, timeout=10
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-                    if result.get("retcode") != 0 or "data" not in result:
+                    forward_data = plugin_event.get_forward_msg(message_id)
+                    if not isinstance(forward_data, dict):
                         plugin_event.reply("获取合并转发消息失败！")
                         return
-                    msglist = result["data"].get("messages", [])
+                    msglist = forward_data.get("messages", [])
                     if not msglist:
                         plugin_event.reply("转发消息内容为空！")
                         return
@@ -4547,25 +4537,15 @@ def reply(plugin_event, Proc, is_group):
                     plugin_event.reply("引用的消息转译失败！")
                     return
                 forward_match = re.search(
-                    r"\[(?:OP|CQ):forward,id=([+-]?\d+)\]", raw_message
+                    r"\[(?:OP|CQ):forward,id=([^,\]]+)\]", raw_message
                 )
                 if forward_match:
                     message_id = forward_match.group(1)
-                    url = f"http://127.0.0.1:{bot_port}/get_forward_msg"
-                    payload = json.dumps({"message_id": message_id})
-                    headers = {
-                        "Authorization": f"Bearer {bot_token}",
-                        "Content-Type": "application/json",
-                    }
-                    response = requests.post(
-                        url, headers=headers, data=payload, timeout=10
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-                    if result.get("retcode") != 0 or "data" not in result:
+                    forward_data = plugin_event.get_forward_msg(message_id)
+                    if not isinstance(forward_data, dict):
                         plugin_event.reply("获取合并转发消息失败！")
                         return
-                    msglist = result["data"].get("messages", [])
+                    msglist = forward_data.get("messages", [])
                     if not msglist:
                         plugin_event.reply("转发消息内容为空！")
                         return
@@ -6676,30 +6656,18 @@ def reply(plugin_event, Proc, is_group):
             if not raw_message:
                 plugin_event.reply("引用的消息转译失败！")
                 return
-            forward_match = re.search(r"\[(?:OP|CQ):forward,id=(-?\d+)\]", raw_message)
+            forward_match = re.search(r"\[(?:OP|CQ):forward,id=([^,\]]+)\]", raw_message)
             if not forward_match:
                 plugin_event.reply(
                     "未找到合并转发消息，请确保引用了关系线合并转发消息！"
                 )
                 return
             message_id = forward_match.group(1)
-            url = f"http://127.0.0.1:{bot_port}/get_forward_msg"
-            payload = json.dumps({"message_id": message_id})
-            headers = {
-                "Authorization": f"Bearer {bot_token}",
-                "Content-Type": "application/json",
-            }
-            response = requests.post(url, headers=headers, data=payload)
-            if response.status_code != 200:
-                plugin_event.reply(f"获取合并转发消息失败：{response.status_code}")
+            forward_data = plugin_event.get_forward_msg(message_id)
+            if not isinstance(forward_data, dict):
+                plugin_event.reply("获取合并转发消息失败！")
                 return
-            response_data = response.json()
-            if response_data.get("retcode") != 0:
-                plugin_event.reply(
-                    f"获取合并转发消息失败：{response_data.get('message', '未知错误')}"
-                )
-                return
-            forward_messages = response_data.get("data", {}).get("messages", [])
+            forward_messages = forward_data.get("messages", [])
             if not forward_messages:
                 plugin_event.reply("合并转发消息内容为空！")
                 return
