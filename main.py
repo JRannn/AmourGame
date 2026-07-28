@@ -4464,11 +4464,12 @@ def reply(plugin_event, Proc, is_group):
                 )
                 if forward_match:
                     message_id = forward_match.group(1)
-                    forward_data = plugin_event.get_forward_msg(message_id)
-                    if not isinstance(forward_data, dict):
-                        plugin_event.reply("获取合并转发消息失败！")
+                    msglist, error_msg = get_forward_messages(
+                        plugin_event, message_id, bot_port, bot_token
+                    )
+                    if error_msg:
+                        plugin_event.reply(error_msg)
                         return
-                    msglist = forward_data.get("messages", [])
                     if not msglist:
                         plugin_event.reply("转发消息内容为空！")
                         return
@@ -4541,11 +4542,12 @@ def reply(plugin_event, Proc, is_group):
                 )
                 if forward_match:
                     message_id = forward_match.group(1)
-                    forward_data = plugin_event.get_forward_msg(message_id)
-                    if not isinstance(forward_data, dict):
-                        plugin_event.reply("获取合并转发消息失败！")
+                    msglist, error_msg = get_forward_messages(
+                        plugin_event, message_id, bot_port, bot_token
+                    )
+                    if error_msg:
+                        plugin_event.reply(error_msg)
                         return
-                    msglist = forward_data.get("messages", [])
                     if not msglist:
                         plugin_event.reply("转发消息内容为空！")
                         return
@@ -6663,11 +6665,12 @@ def reply(plugin_event, Proc, is_group):
                 )
                 return
             message_id = forward_match.group(1)
-            forward_data = plugin_event.get_forward_msg(message_id)
-            if not isinstance(forward_data, dict):
-                plugin_event.reply("获取合并转发消息失败！")
+            forward_messages, error_msg = get_forward_messages(
+                plugin_event, message_id, bot_port, bot_token
+            )
+            if error_msg:
+                plugin_event.reply(error_msg)
                 return
-            forward_messages = forward_data.get("messages", [])
             if not forward_messages:
                 plugin_event.reply("合并转发消息内容为空！")
                 return
@@ -10192,6 +10195,40 @@ def send_forward_message(bot_port, bot_token, group_id, nodes_data):
         return response.json()
     except Exception as e:
         return {"retcode": -1, "message": f"请求失败: {str(e)}"}
+
+
+def get_forward_messages(plugin_event, message_id, bot_port, bot_token):
+    try:
+        get_forward_msg = getattr(plugin_event, "get_forward_msg", None)
+        if callable(get_forward_msg):
+            forward_data = get_forward_msg(message_id)
+            if isinstance(forward_data, dict):
+                messages = forward_data.get("messages")
+                if messages is None:
+                    messages = forward_data.get("data", {}).get("messages")
+                if isinstance(messages, list):
+                    return messages, None
+    except Exception:
+        pass
+
+    url = f"http://127.0.0.1:{bot_port}/get_forward_msg"
+    payload = json.dumps({"message_id": message_id})
+    headers = {
+        "Authorization": f"Bearer {bot_token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = requests.post(url, headers=headers, data=payload, timeout=10)
+        response.raise_for_status()
+        response_data = response.json()
+    except Exception as e:
+        return [], f"获取合并转发消息失败：{str(e)}"
+    if response_data.get("retcode") != 0:
+        return [], f"获取合并转发消息失败：{response_data.get('message', '未知错误')}"
+    messages = response_data.get("data", {}).get("messages", [])
+    if not isinstance(messages, list):
+        return [], "获取合并转发消息失败！"
+    return messages, None
 
 
 def sendletters(playname):
