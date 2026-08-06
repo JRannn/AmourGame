@@ -34,7 +34,7 @@ amourlock = threading.Lock()
 monitor_lock = threading.Lock()
 plugin_events_cache = []
 schedule_started = False
-CURRENT_VERSION = "V2.1.1"
+CURRENT_VERSION = "V2.2.0"
 UPDATE_COMMAND = "更新恋综插件"
 GITHUB_REPO = "JRannn/AmourGame"
 UPDATE_SYNC_LOCK = threading.Lock()
@@ -129,6 +129,181 @@ def _collection_format_text(playname, guest_name, collection_items):
             detail += f"\n\n【说明】\n{item}可带1张图，附在末尾。\n除公知外，其他收集项仅后台可查看。"
         texts.append(detail)
     return "\n\n".join(texts)
+
+
+DROP_ITEM_KEYS = {
+    "礼物": ("giftmiss_to_b", "giftmiss_to_c", "giftmiss"),
+    "小纸条": ("notemiss_to_b", "notemiss_to_c", "notemiss"),
+    "短信": ("smsmiss_to_b", "smsmiss_to_c", "smsmiss"),
+}
+
+DROP_TARGET_NAMES = {
+    "戏群": "play_group",
+    "嘉宾群": "random_guest_group",
+    "专属群": "exclusive_group",
+}
+
+
+def _get_member_display_name(info):
+    if not isinstance(info, dict):
+        return ""
+    return str(info.get("嘉宾姓名") or info.get("NPC姓名") or "").strip()
+
+
+def _parse_group_id_list(text):
+    group_ids = []
+    for item in re.split(r"[/、，,\s]+", str(text or "").strip()):
+        item = item.strip()
+        if item.isdigit() and item not in group_ids:
+            group_ids.append(item)
+    return group_ids
+
+
+def _parse_drop_rule_text(rule_text):
+    rules = []
+    seen_targets = set()
+    total_probability = 0.0
+    for match in re.finditer(
+        r"(戏群|嘉宾群|专属群)\s*([01](?:\.\d*)?|0?\.\d+)",
+        str(rule_text or ""),
+    ):
+        target_label = match.group(1)
+        target_type = DROP_TARGET_NAMES[target_label]
+        probability = float(match.group(2))
+        if probability < 0 or probability > 1:
+            return None, "概率值必须在0到1之间，请重新设置。"
+        if target_type in seen_targets:
+            return None, f"{target_label}重复设置了，请合并成一项。"
+        seen_targets.add(target_type)
+        if probability > 0:
+            rules.append({"target": target_type, "probability": probability})
+            total_probability += probability
+    if not rules:
+        return None, "未找到有效掉落规则，请按「戏群0.2 嘉宾群0.3 专属群0.1」填写。"
+    if total_probability > 1:
+        return None, "掉落概率总和不能超过1。"
+    return rules, None
+
+
+def _set_drop_rules(limit_data, playname, item_type, rules):
+    if playname not in limit_data:
+        limit_data[playname] = {}
+    limit_data[playname].setdefault("drop_rules", {})[item_type] = rules
+    old_keys = DROP_ITEM_KEYS.get(item_type, ())
+    for old_key in old_keys:
+        limit_data[playname].pop(old_key, None)
+
+
+def _clear_drop_rules(limit_data, playname, item_type):
+    if playname not in limit_data:
+        return
+    drop_rules = limit_data[playname].get("drop_rules", {})
+    if isinstance(drop_rules, dict):
+        drop_rules.pop(item_type, None)
+        if not drop_rules:
+            limit_data[playname].pop("drop_rules", None)
+    for old_key in DROP_ITEM_KEYS.get(item_type, ()):
+        limit_data[playname].pop(old_key, None)
+    if not limit_data[playname]:
+        del limit_data[playname]
+
+
+def _get_drop_rules(limit_data, playname, item_type):
+    play_limit = limit_data.get(playname, {}) if isinstance(limit_data, dict) else {}
+    drop_rules = play_limit.get("drop_rules", {})
+    if isinstance(drop_rules, dict) and isinstance(drop_rules.get(item_type), list):
+        return drop_rules[item_type]
+    play_key, guest_key, old_key = DROP_ITEM_KEYS.get(item_type, (None, None, None))
+    if play_key and play_key in play_limit:
+        return [{"target": "play_group", "probability": float(play_limit[play_key])}]
+    if guest_key and guest_key in play_limit:
+        return [
+            {
+                "target": "random_guest_group",
+                "probability": float(play_limit[guest_key]),
+            }
+        ]
+    if old_key and old_key in play_limit:
+        return [{"target": "play_group", "probability": float(play_limit[old_key])}]
+    return []
+
+
+def _choose_drop_rule(limit_data, playname, item_type):
+    rules = _get_drop_rules(limit_data, playname, item_type)
+    if not rules:
+        return None
+    rolled = random.random()
+    cumulative = 0.0
+    for rule in rules:
+        probability = float(rule.get("probability", 0) or 0)
+        cumulative += probability
+        if rolled < cumulative:
+            return rule
+    return None
+
+
+def _drop_pick_random_guest_group(privategroup, playname, sender, recver):
+    guests = []
+    for guest_uid, guest_info in privategroup.get(playname, {}).items():
+        if (
+            str(guest_uid).isdigit()
+            and str(guest_uid) not in (str(sender), str(recver))
+            and isinstance(guest_info, dict)
+        ):
+            group_id = guest_info.get("个人群号") or guest_info.get("NPC群号")
+            if group_id:
+                guests.append(str(group_id))
+    return random.choice(guests) if guests else ""
+
+
+def _drop_pick_exclusive_group(limit_data, playname, recver):
+    play_limit = limit_data.get(playname, {}) if isinstance(limit_data, dict) else {}
+    group_map = play_limit.get("drop_guest_groups", {})
+    group_ids = group_map.get(str(recver), []) if isinstance(group_map, dict) else []
+    if isinstance(group_ids, str):
+        group_ids = _parse_group_id_list(group_ids)
+    group_ids = [str(group_id) for group_id in group_ids if str(group_id).isdigit()]
+    return random.choice(group_ids) if group_ids else ""
+
+
+def _send_dropped_message(plugin_event, playname, item_type, group_id, content, signature):
+    if item_type == "礼物":
+        prefix = "你捡到了一份礼物！"
+    elif item_type == "小纸条":
+        prefix = "你捡到了一张小纸条！"
+    else:
+        prefix = "你收到了一条短信！"
+    leak_msg = f"{prefix}\n\n内容：{content}\n署名：{signature}"
+    plugin_event.send("group", group_id, leak_msg)
+
+
+def _handle_drop(plugin_event, limit_data, playname, item_type, sender, recver, content, signature):
+    rule = _choose_drop_rule(limit_data, playname, item_type)
+    if not rule:
+        return False, ""
+    target = rule.get("target")
+    if target == "play_group":
+        register = getData("groupcollection", "register.json")
+        play_group = register.get(playname, {}).get("play_group", "")
+        if not play_group:
+            return True, f"\n\n判定失败，{item_type}已掉落，但未找到戏群群号，未发送至任何群包括收件人。"
+        leak_msg = f"{playname} {item_type}\n内容：{content}\n署名：{signature}"
+        plugin_event.send("group", play_group, leak_msg)
+        return True, f"\n\n判定失败，{item_type}已掉落到戏群！"
+    if target == "random_guest_group":
+        privategroup = getData("groupcollection", "privategroup.json")
+        group_id = _drop_pick_random_guest_group(privategroup, playname, sender, recver)
+        if not group_id:
+            return True, f"\n\n判定失败，{item_type}已掉落至神秘之处！"
+        _send_dropped_message(plugin_event, playname, item_type, group_id, content, signature)
+        return True, f"\n\n判定失败，{item_type}已掉落至神秘之处！"
+    if target == "exclusive_group":
+        group_id = _drop_pick_exclusive_group(limit_data, playname, recver)
+        if not group_id:
+            return True, f"\n\n判定失败，{item_type}已掉落至神秘之处！"
+        _send_dropped_message(plugin_event, playname, item_type, group_id, content, signature)
+        return True, f"\n\n判定失败，{item_type}已掉落至神秘之处！"
+    return True, f"\n\n判定失败，但未找到掉落目标设置。"
 
 
 def _parse_cleanup_whitelist(text):
@@ -226,6 +401,7 @@ class Event(object):
             groupnum_path = "./data/images/恋综备用群/群号"
             if not os.path.exists(groupnum_path):
                 os.makedirs(groupnum_path, exist_ok=True)
+        dispatch_embedded_module_event("init_after", plugin_event, Proc)
 
     def group_message(plugin_event, Proc):
         global plugin_events_cache, schedule_started
@@ -237,6 +413,7 @@ class Event(object):
             schedule_started = True
         if dispatch_game_event(plugin_event, Proc, is_group=True):
             return
+        dispatch_embedded_module_event("group_message", plugin_event, Proc)
         reply(plugin_event, Proc, is_group=True)
 
     def group_message_recall(plugin_event, Proc):
@@ -246,12 +423,13 @@ class Event(object):
 
     def private_message(plugin_event, Proc):
         dispatch_game_event(plugin_event, Proc, is_group=False)
+        dispatch_embedded_module_event("private_message", plugin_event, Proc)
 
     def poke(plugin_event, Proc):
-        pass
+        dispatch_embedded_module_event("poke", plugin_event, Proc)
 
     def save(plugin_event, Proc):
-        pass
+        dispatch_embedded_module_event("save", plugin_event, Proc)
 
     def group_member_increase(plugin_event, Proc):
         auto_rename_group(plugin_event, Proc)
@@ -275,6 +453,29 @@ class Event(object):
         plugin_event.set_group_add_request(plugin_event.data.flag, "add", True, "")
 
 
+EMBEDDED_MODULE_HANDLERS = (
+    ("ArchiveV2_1_0", {"group_message": "reply"}),
+    ("reconnoiter", {"init_after": "init_after", "group_message": "reply"}),
+)
+
+
+def dispatch_embedded_module_event(event_name, plugin_event, Proc):
+    for module_name, handlers in EMBEDDED_MODULE_HANDLERS:
+        handler_name = handlers.get(event_name)
+        if not handler_name:
+            continue
+        try:
+            module = __import__(f"AmourGame.{module_name}", fromlist=[handler_name])
+            event_handler = getattr(module, handler_name, None)
+            if event_handler:
+                event_handler(plugin_event, Proc)
+        except Exception as e:
+            try:
+                plugin_event.reply(f"{module_name}功能错误：{e}")
+            except Exception:
+                pass
+
+
 GAME_COMMAND_PREFIXES = (
     "游戏插件手册",
     "出场顺序 ",
@@ -283,6 +484,9 @@ GAME_COMMAND_PREFIXES = (
     "晚间游戏 ",
     "开启游戏",
     "结束游戏",
+    "设置自动跳过",
+    "自动跳过",
+    "关闭自动跳过",
     "查看座位",
     "坐",
     "不坐",
@@ -2658,6 +2862,144 @@ def reply(plugin_event, Proc, is_group):
         ):
             return
 
+    elif re.match(r"^掉落群设置\s+(.+)$", message):
+        match = re.match(r"^掉落群设置\s+(.+)$", message)
+        playname = match.group(1).strip()
+        if uid not in masterlist:
+            plugin_event.reply("权限不足，仅骰主可设置专属掉落群。")
+            return
+        register = getData("groupcollection", "register.json")
+        if playname not in register:
+            plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+            return
+        if groupid != str(register[playname].get("manage_group", "")):
+            plugin_event.reply(f"请在恋综「{playname}」的后台群中设置专属掉落群。")
+            return
+        privategroup = getData("groupcollection", "privategroup.json")
+        if playname not in privategroup:
+            plugin_event.reply(f"恋综「{playname}」暂无嘉宾数据。")
+            return
+        limit_data = getData("sendmessage", "limit.json")
+        group_map = limit_data.get(playname, {}).get("drop_guest_groups", {})
+        lines = [f"【掉落群设置·{playname}】"]
+        for member_uid, info in privategroup[playname].items():
+            if not str(member_uid).isdigit() or not isinstance(info, dict):
+                continue
+            member_name = _get_member_display_name(info)
+            if not member_name:
+                continue
+            group_ids = group_map.get(str(member_uid), []) if isinstance(group_map, dict) else []
+            if isinstance(group_ids, str):
+                group_ids = _parse_group_id_list(group_ids)
+            lines.append(f"{member_name}：{' '.join(group_ids)}")
+        plugin_event.reply("\n".join(lines))
+        return
+
+    elif message.startswith("【掉落群设置·"):
+        match = re.search(r"【掉落群设置·(.+?)】", message)
+        if not match:
+            plugin_event.reply("格式错误！")
+            return
+        playname = match.group(1).strip()
+        if uid not in masterlist:
+            plugin_event.reply("权限不足，仅骰主可设置专属掉落群。")
+            return
+        register = getData("groupcollection", "register.json")
+        if playname not in register:
+            plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+            return
+        if groupid != str(register[playname].get("manage_group", "")):
+            plugin_event.reply(f"请在恋综「{playname}」的后台群中设置专属掉落群。")
+            return
+        privategroup = getData("groupcollection", "privategroup.json")
+        if playname not in privategroup:
+            plugin_event.reply(f"恋综「{playname}」暂无嘉宾数据。")
+            return
+        name_to_uid = {}
+        for member_uid, info in privategroup[playname].items():
+            member_name = _get_member_display_name(info)
+            if str(member_uid).isdigit() and member_name:
+                name_to_uid[member_name] = str(member_uid)
+        limit_data = getData("sendmessage", "limit.json")
+        if playname not in limit_data:
+            limit_data[playname] = {}
+        group_map = limit_data[playname].setdefault("drop_guest_groups", {})
+        updated = []
+        cleared = []
+        not_found = []
+        for line in message[match.end():].splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            line_match = re.match(r"(.+?)[:：]\s*(.*)", line)
+            if not line_match:
+                continue
+            member_name, group_text = line_match.groups()
+            member_name = member_name.strip()
+            group_text = group_text.strip()
+            member_uid = name_to_uid.get(member_name)
+            if not member_uid:
+                not_found.append(member_name)
+                continue
+            if not group_text:
+                continue
+            if group_text == "无":
+                if member_uid in group_map:
+                    del group_map[member_uid]
+                cleared.append(member_name)
+                continue
+            group_ids = _parse_group_id_list(group_text)
+            if group_ids:
+                group_map[member_uid] = group_ids
+                updated.append(member_name)
+        if not group_map:
+            limit_data[playname].pop("drop_guest_groups", None)
+        if not limit_data[playname]:
+            del limit_data[playname]
+        setData("sendmessage", "limit.json", limit_data)
+        reply_msg = f"专属掉落群已保存：{len(updated)}人"
+        if cleared:
+            reply_msg += f"\n已清空：{'、'.join(cleared)}"
+        if not_found:
+            reply_msg += f"\n未找到：{'、'.join(not_found)}"
+        plugin_event.reply(reply_msg)
+        return
+
+    elif re.match(r"^(.+?)\s*(礼物|小纸条|短信)掉落\s+(.+)$", message):
+        match = re.match(r"^(.+?)\s*(礼物|小纸条|短信)掉落\s+(.+)$", message)
+        playname = match.group(1).strip()
+        item_type = match.group(2)
+        rule_text = match.group(3).strip()
+        if uid not in masterlist:
+            plugin_event.reply(f"权限不足，仅骰主可设置{item_type}掉落概率。")
+            return
+        register = getData("groupcollection", "register.json")
+        if playname not in register:
+            plugin_event.reply(f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！")
+            return
+        if groupid != str(register[playname].get("manage_group", "")):
+            plugin_event.reply(f"请在恋综「{playname}」的后台群中设置{item_type}掉落。")
+            return
+        limit_data = getData("sendmessage", "limit.json")
+        if rule_text in ("关闭", "0", "无"):
+            _clear_drop_rules(limit_data, playname, item_type)
+            setData("sendmessage", "limit.json", limit_data)
+            plugin_event.reply(f"已关闭恋综「{playname}」的{item_type}掉落功能。")
+            return
+        rules, error_msg = _parse_drop_rule_text(rule_text)
+        if error_msg:
+            plugin_event.reply(error_msg)
+            return
+        _set_drop_rules(limit_data, playname, item_type, rules)
+        setData("sendmessage", "limit.json", limit_data)
+        target_names = {"play_group": "戏群", "random_guest_group": "嘉宾群", "exclusive_group": "专属群"}
+        rule_display = " ".join(
+            f"{target_names.get(rule['target'], rule['target'])}{float(rule['probability']):g}"
+            for rule in rules
+        )
+        plugin_event.reply(f"已设置恋综「{playname}」的{item_type}掉落规则：{rule_display}")
+        return
+
     elif (
         re.search(r"致\s*.+?\s*礼物", message)
         or re.search(r"礼物\s+.+?\s*致", message)
@@ -2740,26 +3082,18 @@ def reply(plugin_event, Proc, is_group):
                 )
                 return
             limit_data = getData("sendmessage", "limit.json")
-            key_to_set = "giftmiss_to_b" if drop_to == "戏群" else "giftmiss_to_c"
-            key_to_remove = "giftmiss_to_c" if drop_to == "戏群" else "giftmiss_to_b"
             if probability == 0:
-                if playname in limit_data:
-                    if key_to_set in limit_data[playname]:
-                        del limit_data[playname][key_to_set]
-                        if not limit_data[playname]:
-                            del limit_data[playname]
-                        setData("sendmessage", "limit.json", limit_data)
-                        plugin_event.reply(f"已关闭恋综「{playname}」的礼物掉落功能。")
-                    else:
-                        plugin_event.reply(f"恋综「{playname}」没有开启礼物掉落功能。")
-                else:
-                    plugin_event.reply(f"恋综「{playname}」没有开启礼物掉落功能。")
+                _clear_drop_rules(limit_data, playname, "礼物")
+                setData("sendmessage", "limit.json", limit_data)
+                plugin_event.reply(f"已关闭恋综「{playname}」的礼物掉落功能。")
                 return
-            if playname not in limit_data:
-                limit_data[playname] = {}
-            if key_to_remove in limit_data[playname]:
-                del limit_data[playname][key_to_remove]
-            limit_data[playname][key_to_set] = probability
+            target_type = "play_group" if drop_to == "戏群" else "random_guest_group"
+            _set_drop_rules(
+                limit_data,
+                playname,
+                "礼物",
+                [{"target": target_type, "probability": probability}],
+            )
             setData("sendmessage", "limit.json", limit_data)
             if probability == 1:
                 probability_display = "100%"
@@ -2870,16 +3204,7 @@ def reply(plugin_event, Proc, is_group):
                         f"{day_display}已赠送{current_count}份礼物啦！已达到每日限额{daily_limit}份，无法继续赠送。"
                     )
                     return
-            miss_probability = None
             leaked = False
-            if playname in limit_data:
-                if "giftmiss_to_b" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["giftmiss_to_b"]  # 戏群
-                elif "giftmiss_to_c" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["giftmiss_to_c"]  # 嘉宾群
-                # 兼容旧版本（如果存在旧的giftmiss键，视为giftmiss_to_b）
-                elif "giftmiss" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["giftmiss"]
             key = (
                 playname
                 + "/////"
@@ -2902,55 +3227,17 @@ def reply(plugin_event, Proc, is_group):
                 )
             else:
                 reply_message += f"{day_display}已赠送{current_count + 1}份。"
-            if miss_probability and miss_probability > 0:
-                leaked = random.random() < miss_probability
-                if leaked:
-                    if "giftmiss_to_b" in limit_data.get(playname, {}):
-                        register = getData("groupcollection", "register.json")
-                        if playname in register:
-                            play_group = register[playname].get("play_group", "")
-                            if play_group:
-                                leak_msg = (
-                                    f"{playname} 礼物\n"
-                                    f"内容：{content}\n"
-                                    f"署名：{signature}"
-                                )
-                                plugin_event.send("group", play_group, leak_msg)
-                                reply_message += f"\n\n判定失败，礼物已泄漏到戏群！"
-                            else:
-                                reply_message += f"\n\n判定失败，礼物已掉落，但未找到戏群群号，未发送至任何群包括收件人。"
-                    elif "giftmiss_to_c" in limit_data.get(playname, {}):
-                        privategroup = getData("groupcollection", "privategroup.json")
-                        if playname in privategroup:
-                            guests = []
-                            for guest_uid, guest_info in privategroup[playname].items():
-                                if (
-                                    guest_uid.isdigit()
-                                    and "嘉宾姓名" in guest_info
-                                    and guest_uid != sender
-                                    and guest_uid != recver
-                                ):
-                                    guests.append((guest_uid, guest_info))
-                            if guests:
-                                random_guest_uid, random_guest_info = random.choice(
-                                    guests
-                                )
-                                guest_name = random_guest_info.get("嘉宾姓名", "")
-                                guest_group_id = random_guest_info.get("个人群号", "")
-                                if guest_group_id:
-                                    leak_msg = (
-                                        f"你捡到了一份礼物！\n\n"
-                                        f"内容：{content}\n"
-                                        f"署名：{signature}"
-                                    )
-                                    plugin_event.send("group", guest_group_id, leak_msg)
-                                    reply_message += (
-                                        f"\n\n判定失败，礼物已掉落至神秘之处！"
-                                    )
-                        else:
-                            reply_message += f"\n\n判定失败，礼物已掉落，但未能发送至任何地方，请联系管理检查。"
-                    else:
-                        reply_message += f"\n\n判定失败，但未找到掉落目标设置。"
+            leaked, drop_message = _handle_drop(
+                plugin_event,
+                limit_data,
+                playname,
+                "礼物",
+                sender,
+                recver,
+                content,
+                signature,
+            )
+            reply_message += drop_message
             plugin_event.reply(reply_message)
             if not leaked:
                 if playname in privategroup and recver in privategroup[playname]:
@@ -3088,30 +3375,18 @@ def reply(plugin_event, Proc, is_group):
                 )
                 return
             limit_data = getData("sendmessage", "limit.json")
-            key_to_set = "notemiss_to_b" if drop_to == "戏群" else "notemiss_to_c"
-            key_to_remove = "notemiss_to_c" if drop_to == "戏群" else "notemiss_to_b"
             if probability == 0:
-                if playname in limit_data:
-                    if key_to_set in limit_data[playname]:
-                        del limit_data[playname][key_to_set]
-                        if not limit_data[playname]:
-                            del limit_data[playname]
-                        setData("sendmessage", "limit.json", limit_data)
-                        plugin_event.reply(
-                            f"已关闭恋综「{playname}」的小纸条掉落功能。"
-                        )
-                    else:
-                        plugin_event.reply(
-                            f"恋综「{playname}」没有开启小纸条掉落功能。"
-                        )
-                else:
-                    plugin_event.reply(f"恋综「{playname}」没有开启小纸条掉落功能。")
+                _clear_drop_rules(limit_data, playname, "小纸条")
+                setData("sendmessage", "limit.json", limit_data)
+                plugin_event.reply(f"已关闭恋综「{playname}」的小纸条掉落功能。")
                 return
-            if playname not in limit_data:
-                limit_data[playname] = {}
-            if key_to_remove in limit_data[playname]:
-                del limit_data[playname][key_to_remove]
-            limit_data[playname][key_to_set] = probability
+            target_type = "play_group" if drop_to == "戏群" else "random_guest_group"
+            _set_drop_rules(
+                limit_data,
+                playname,
+                "小纸条",
+                [{"target": target_type, "probability": probability}],
+            )
             setData("sendmessage", "limit.json", limit_data)
             if probability == 1:
                 probability_display = "100%"
@@ -3222,16 +3497,7 @@ def reply(plugin_event, Proc, is_group):
                         f"{day_display}已发送{current_count}份小纸条啦！已达到每日限额{daily_limit}份，无法继续发送。"
                     )
                     return
-            miss_probability = None
             leaked = False
-            if playname in limit_data:
-                if "notemiss_to_b" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["notemiss_to_b"]  # 戏群
-                elif "notemiss_to_c" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["notemiss_to_c"]  # 嘉宾群
-                # 兼容旧版本（如果存在旧的notemiss键，视为notemiss_to_b）
-                elif "notemiss" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["notemiss"]
             key = (
                 playname
                 + "/////"
@@ -3260,55 +3526,17 @@ def reply(plugin_event, Proc, is_group):
                     reply_message += f"{day_display}已发送{current_count + 1}份。"
                 else:
                     reply_message += f"今日已发送{current_count + 1}份。"
-            if miss_probability and miss_probability > 0:
-                leaked = random.random() < miss_probability
-                if leaked:
-                    if "notemiss_to_b" in limit_data.get(playname, {}):
-                        register = getData("groupcollection", "register.json")
-                        if playname in register:
-                            play_group = register[playname].get("play_group", "")
-                            if play_group:
-                                leak_msg = (
-                                    f"{playname} 小纸条\n"
-                                    f"内容：{content}\n"
-                                    f"署名：{signature}"
-                                )
-                                plugin_event.send("group", play_group, leak_msg)
-                                reply_message += f"\n\n判定失败，小纸条已掉落到戏群！"
-                            else:
-                                reply_message += f"\n\n判定失败，小纸条已掉落，但未找到戏群群号，未发送至任何群包括收件人。"
-                    elif "notemiss_to_c" in limit_data.get(playname, {}):
-                        privategroup = getData("groupcollection", "privategroup.json")
-                        if playname in privategroup:
-                            guests = []
-                            for guest_uid, guest_info in privategroup[playname].items():
-                                if (
-                                    guest_uid.isdigit()
-                                    and "嘉宾姓名" in guest_info
-                                    and guest_uid != sender
-                                    and guest_uid != recver
-                                ):
-                                    guests.append((guest_uid, guest_info))
-                            if guests:
-                                random_guest_uid, random_guest_info = random.choice(
-                                    guests
-                                )
-                                guest_name = random_guest_info.get("嘉宾姓名", "")
-                                guest_group_id = random_guest_info.get("个人群号", "")
-                                if guest_group_id:
-                                    leak_msg = (
-                                        f"你捡到了一张小纸条！\n\n"
-                                        f"内容：{content}\n"
-                                        f"署名：{signature}"
-                                    )
-                                    plugin_event.send("group", guest_group_id, leak_msg)
-                                    reply_message += (
-                                        f"\n\n判定失败，小纸条已掉落至神秘之处！"
-                                    )
-                        else:
-                            reply_message += f"\n\n判定失败，小纸条已掉落，但未能发送至任何地方，请联系管理检查。"
-                    else:
-                        reply_message += f"\n\n判定失败，但未找到掉落目标设置。"
+            leaked, drop_message = _handle_drop(
+                plugin_event,
+                limit_data,
+                playname,
+                "小纸条",
+                sender,
+                recver,
+                content,
+                signature,
+            )
+            reply_message += drop_message
             plugin_event.reply(reply_message)
             if not leaked:
                 if playname in privategroup and recver in privategroup[playname]:
@@ -3446,26 +3674,18 @@ def reply(plugin_event, Proc, is_group):
                 )
                 return
             limit_data = getData("sendmessage", "limit.json")
-            key_to_set = "smsmiss_to_b" if drop_to == "戏群" else "smsmiss_to_c"
-            key_to_remove = "smsmiss_to_c" if drop_to == "戏群" else "smsmiss_to_b"
             if probability == 0:
-                if playname in limit_data:
-                    if key_to_set in limit_data[playname]:
-                        del limit_data[playname][key_to_set]
-                        if not limit_data[playname]:
-                            del limit_data[playname]
-                        setData("sendmessage", "limit.json", limit_data)
-                        plugin_event.reply(f"已关闭恋综「{playname}」的短信掉落功能。")
-                    else:
-                        plugin_event.reply(f"恋综「{playname}」没有开启短信掉落功能。")
-                else:
-                    plugin_event.reply(f"恋综「{playname}」没有开启短信掉落功能。")
+                _clear_drop_rules(limit_data, playname, "短信")
+                setData("sendmessage", "limit.json", limit_data)
+                plugin_event.reply(f"已关闭恋综「{playname}」的短信掉落功能。")
                 return
-            if playname not in limit_data:
-                limit_data[playname] = {}
-            if key_to_remove in limit_data[playname]:
-                del limit_data[playname][key_to_remove]
-            limit_data[playname][key_to_set] = probability
+            target_type = "play_group" if drop_to == "戏群" else "random_guest_group"
+            _set_drop_rules(
+                limit_data,
+                playname,
+                "短信",
+                [{"target": target_type, "probability": probability}],
+            )
             setData("sendmessage", "limit.json", limit_data)
             if probability == 1:
                 probability_display = "100%"
@@ -3576,16 +3796,7 @@ def reply(plugin_event, Proc, is_group):
                         f"{day_display}已发送{current_count}份短信啦！已达到每日限额{daily_limit}份，无法继续发送。"
                     )
                     return
-            miss_probability = None
             leaked = False
-            if playname in limit_data:
-                if "smsmiss_to_b" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["smsmiss_to_b"]  # 戏群
-                elif "smsmiss_to_c" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["smsmiss_to_c"]  # 嘉宾群
-                # 兼容旧版本（如果存在旧的smsmiss键，视为smsmiss_to_b）
-                elif "smsmiss" in limit_data[playname]:
-                    miss_probability = limit_data[playname]["smsmiss"]
             key = (
                 playname
                 + "/////"
@@ -3608,55 +3819,17 @@ def reply(plugin_event, Proc, is_group):
                 )
             else:
                 reply_message += f"{day_display}已发送{current_count + 1}份。"
-            if miss_probability and miss_probability > 0:
-                leaked = random.random() < miss_probability
-                if leaked:
-                    if "smsmiss_to_b" in limit_data.get(playname, {}):
-                        register = getData("groupcollection", "register.json")
-                        if playname in register:
-                            play_group = register[playname].get("play_group", "")
-                            if play_group:
-                                leak_msg = (
-                                    f"{playname} 短信\n"
-                                    f"内容：{content}\n"
-                                    f"署名：{signature}"
-                                )
-                                plugin_event.send("group", play_group, leak_msg)
-                                reply_message += f"\n\n判定失败，短信已泄漏到戏群！"
-                            else:
-                                reply_message += f"\n\n判定失败，短信已掉落，但未找到戏群群号，未发送至任何群包括收件人。"
-                    elif "smsmiss_to_c" in limit_data.get(playname, {}):
-                        privategroup = getData("groupcollection", "privategroup.json")
-                        if playname in privategroup:
-                            guests = []
-                            for guest_uid, guest_info in privategroup[playname].items():
-                                if (
-                                    guest_uid.isdigit()
-                                    and "嘉宾姓名" in guest_info
-                                    and guest_uid != sender
-                                    and guest_uid != recver
-                                ):
-                                    guests.append((guest_uid, guest_info))
-                            if guests:
-                                random_guest_uid, random_guest_info = random.choice(
-                                    guests
-                                )
-                                guest_name = random_guest_info.get("嘉宾姓名", "")
-                                guest_group_id = random_guest_info.get("个人群号", "")
-                                if guest_group_id:
-                                    leak_msg = (
-                                        f"你收到了一条短信！\n\n"
-                                        f"内容：{content}\n"
-                                        f"署名：{signature}"
-                                    )
-                                    plugin_event.send("group", guest_group_id, leak_msg)
-                                    reply_message += (
-                                        f"\n\n判定失败，短信已掉落至神秘之处！"
-                                    )
-                        else:
-                            reply_message += f"\n\n判定失败，短信已掉落，但未能发送至任何地方，请联系管理检查。"
-                    else:
-                        reply_message += f"\n\n判定失败，但未找到掉落目标设置。"
+            leaked, drop_message = _handle_drop(
+                plugin_event,
+                limit_data,
+                playname,
+                "短信",
+                sender,
+                recver,
+                content,
+                signature,
+            )
+            reply_message += drop_message
             plugin_event.reply(reply_message)
             if not leaked:
                 if playname in privategroup and recver in privategroup[playname]:
@@ -7038,9 +7211,9 @@ def reply(plugin_event, Proc, is_group):
             f"{replace_playname} 限制心动信\n\n【说明】\n发送后获得每日限额表格，按需填写。\n冒号后填写数量。\n数量为0，即关闭玩法。\n数量为-1，即移除限制。",
             f"{replace_playname} 限制心动信 Dx 嘉宾/NPC姓名 数量\n\n【说明】\n数量二字改为数字。\n数量为0，即关闭玩法。\n数量为-1，即移除限制。",
             f"{replace_playname} 限制私约/电话/心愿/微信/礼物/小纸条/短信/留言板/点歌 数量\n\n【说明】\n数量二字改为数字。\n数量为0，即关闭玩法。\n数量为-1，即移除限制。\n\n私约/电话/心愿/礼物/小纸条/短信，为每人每日限制。\n留言板/点歌为日程总限制。\n微信仅可限制0或-1。\n\n默认限制全日程，可每天更改。",
-            f"{replace_playname} 礼物/小纸条/短信掉落至戏群/嘉宾群，概率x\n\n【说明】\n概率x为数字，范围0-1。\n概率为0时，移除掉落。\n概率为1时，必定掉落。\n随机掉落的嘉宾群已排除发件人与收件人。",
+            f"{replace_playname} 礼物掉落 戏群0.2 嘉宾群0.3 专属群0.1\n{replace_playname} 小纸条掉落 戏群0.2 嘉宾群0.3 专属群0.1\n{replace_playname} 短信掉落 戏群0.2 嘉宾群0.3 专属群0.1\n掉落群设置 {replace_playname}\n\n【说明】\n每个地点可设置不同概率，概率总和不可超过1；每次判定最多只掉落到一个地点。\n发送「{replace_playname} 礼物/小纸条/短信掉落 关闭」可关闭对应掉落。\n「嘉宾群」会随机掉落到同综其他嘉宾/NPC个人群，排除发件人与收件人。\n「专属群」按收件人查询专属掉落群；发送「掉落群设置 恋综名」获取表格，按“姓名：群号 群号2”填写，多个群会随机选择一个，填写“无”可清空。",
             f"删除心动信的指令在嘉宾的格式中，骰主权限可删除任意心动信。",
-            f"通报设置 {replace_playname}\n\n【说明】\n查看当前恋综的出门通报设置；修改骰子返回的表格后整表发送，可覆盖保存。\n概率填写0-1；通报对象1匿名、2邀请者、3受邀者、4所有参与者、5参与者分别判定。",
+            f"通报设置 {replace_playname}\n\n【说明】\n查看当前恋综的出门通报设置；修改骰子返回的表格后整表发送，可覆盖保存。\n通报概率只填数字时默认掉落至戏群；也可填写「戏群0.2 嘉宾群0.3 专属群0.1」，概率总和不可超过1，每次最多只通报到一个地点。\n专属群复用「掉落群设置 恋综名」中的专属掉落群。\n通报对象1匿名、2邀请者、3受邀者、4所有参与者、5参与者分别判定。",
             f"个人群录入 {replace_playname}\n\n【说明】\n代录入格式「嘉宾姓名：张三@对方」",
             f"NPC录入 {replace_playname}\n\n【说明】\n同一恋综的NPC可重复使用同一个个人群。",
             f"{replace_playname} 个人群列表",
@@ -7048,7 +7221,7 @@ def reply(plugin_event, Proc, is_group):
             f"{replace_playname} 设置戏群名片/头衔\n\n【说明】\n录入皮相后才可以设置头衔，设置头衔需群主权限。",
             f"{replace_playname} 小群催戏\n\n【注意】\n每隔2秒逐个向未结小群催戏，若未结群数量巨大，请谨慎使用以防风险检测。",
             f"{replace_playname} 个人群催戏\n\n【注意】\n每隔2秒逐个向嘉宾个人群催戏。",
-            f"一键催戏 {replace_playname}\n\n【说明】\n只提醒超过设置时长的小群。尚未开戏时提醒全部参与者；已经开戏时提醒当前待回戏者，并按人向个人群发送一条待处理小群汇总。\n默认催5h以上未回的小群，可使用「设置催戏 {replace_playname} 时长」指令修改，时长为小时数，支持小数。",
+            f"一键催戏 {replace_playname}\n\n【说明】\n只提醒超过设置时长的小群，不催微信。尚未开戏时提醒全部参与者；已经开戏时提醒当前待回戏者，并按人向个人群发送一条待处理小群汇总。\n默认催5h以上未回的小群，可使用「设置催戏 {replace_playname} 时长」指令修改，时长为小时数，支持小数。",
             f"{replace_playname} 数量\n\n【说明】\n查看今日全体互动数据。\n每天10点、15点、20点、23点59分，自动在公告群播报。",
             f"删除私约/电话/前置电话/官约/微信+编号\n\n【说明】\n指令中无需+号。\n删除并释放小群+删除时间线。\n删除后会通知至个人群。",
             f"添加时间线：{replace_playname} 嘉宾/NPC姓名 私约/电话/前置电话/官约/微信/心愿 Dx 07:00-23:59\n\n【说明】\n添加后不会创建小群、并默认已结。\n添加的时间线不会计入公告的小群数量。\n添加后会通知至个人群。",

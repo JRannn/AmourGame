@@ -8,6 +8,11 @@ GAME_TYPES = ["数字炸弹", "女巫毒药"]
 def is_active_player(player):
     return bool(player.get("uid") and player.get("name"))
 
+def keep_auto_skip_config(new_game, old_game):
+    if "auto_skip_seconds" in old_game:
+        new_game["auto_skip_seconds"] = old_game["auto_skip_seconds"]
+    return new_game
+
 def get_next_active_turn(personal, turn):
     max_turn = len(personal)
     if max_turn <= 0:
@@ -66,7 +71,7 @@ def start_number_bomb(data, groupid, low, high):
 
     bomb = random.randint(low + 1, high - 1)
 
-    data[groupid]["game"] = {
+    data[groupid]["game"] = keep_auto_skip_config({
         "type": "数字炸弹",
         "bomb": bomb,
         "low": low,
@@ -75,7 +80,8 @@ def start_number_bomb(data, groupid, low, high):
         "origin_high": high,
         "hit_history": hit_history,
         "turn": start_turn
-    }
+    }, old_game)
+    engine.mark_round_start(data[groupid]["game"])
 
     setData("game.json", data)
 
@@ -201,6 +207,7 @@ def skip_number_bomb(plugin_event, data, groupid):
     current_player = personal[str(turn)]
 
     game["turn"] = get_next_active_turn(personal, turn)
+    engine.mark_round_start(game)
 
     next_turn = game["turn"]
     next_player = personal.get(str(next_turn), {}).get("uid", "")
@@ -251,6 +258,7 @@ def handle_number_bomb(plugin_event, data, groupid, uid, message):
         game["high"] = origin_high
         game["bomb"] = random.randint(origin_low + 1, origin_high - 1)
         game["turn"] = next_turn
+        engine.mark_round_start(game)
         next_player = personal.get(str(next_turn), {}).get("uid", "")
         setData("game.json", data)
         plugin_event.reply(
@@ -268,6 +276,7 @@ def handle_number_bomb(plugin_event, data, groupid, uid, message):
 
     personal = data[groupid]["个人"]
     game["turn"] = get_next_active_turn(personal, turn)
+    engine.mark_round_start(game)
     setData("game.json", data)
     next_player = personal.get(str(game["turn"]), {}).get("uid", "")
     if not next_player:
@@ -299,7 +308,7 @@ def send_number_bomb_history(plugin_event, game, groupid):
 def start_witch_poison(data, groupid, low, high):
     old_game = data[groupid].get("game", {})
     hit_history = old_game.get("hit_history", []) if old_game.get("type") == "女巫毒药" else []
-    data[groupid]["game"] = {
+    data[groupid]["game"] = keep_auto_skip_config({
         "type": "女巫毒药",
         "low": low,
         "high": high,
@@ -309,7 +318,7 @@ def start_witch_poison(data, groupid, low, high):
         "dead": [],       # 已出局 uid
         "chosen": [],
         "hit_history": hit_history,
-    }
+    }, old_game)
 
     setData("game.json", data)
     if data[groupid]["playname"]:
@@ -391,6 +400,7 @@ def check_position(data, groupid):
     seated = [p for p in personal.values() if is_active_player(p)]
     if seated and len(poisoned_users) >= len(seated) and all(str(p.get("uid")) in poisoned_users for p in seated):
         game["turn"] = get_next_alive_turn(personal, 0, game.get("dead", []))
+        engine.mark_round_start(game)
         setData("game.json", data)
         first_player = personal[str(game["turn"])]["uid"]
         return f"所有人已放毒完毕！[OP:at,id={first_player}]请在{game['low']}~{game['high']}中选择，直接发送你选择的数字即可。"
@@ -400,6 +410,7 @@ def start_position(data, groupid):
     game = data[groupid].get("game")
     personal = data[groupid]["个人"]
     game["turn"] = get_next_alive_turn(personal, 0, game.get("dead", []))
+    engine.mark_round_start(game)
     setData("game.json", data)
     if not game["turn"]:
         return "没有可进行游戏的玩家。"
@@ -415,6 +426,7 @@ def skip_witch(plugin_event, data, groupid, con = 0):
 
     if not con:
         game["turn"] = get_next_alive_turn(personal, turn, game.get("dead", []))
+        engine.mark_round_start(game)
         name = current_player.get('name', f'{turn}号')
         plugin_event.reply(f"{name} 已被跳过！")
 
@@ -530,6 +542,7 @@ def handle_witch_poison(plugin_event, data, groupid, uid, message):
 
     game.setdefault("chosen", []).append(num)
     game["turn"] = get_next_alive_turn(personal, turn, game.get("dead", []))
+    engine.mark_round_start(game)
     setData("game.json", data)
     if not game["turn"]:
         plugin_event.reply("没有可继续游戏的玩家。")
@@ -542,6 +555,20 @@ def handle_witch_poison(plugin_event, data, groupid, uid, message):
     else:
         skip_witch(plugin_event, data, groupid, con = 1)
     return
+
+
+def check_timeout(plugin_event, data, groupid):
+    game = data[groupid].get("game", {})
+    if game.get("type") not in GAME_TYPES or not engine.is_round_timeout(game):
+        return False
+    plugin_event.reply(f"本轮已超过{engine.round_timeout_minutes_text(game)}，自动跳过。")
+    if game.get("type") == "数字炸弹":
+        skip_number_bomb(plugin_event, data, groupid)
+        return True
+    if game.get("type") == "女巫毒药" and game.get("turn"):
+        skip_witch(plugin_event, data, groupid)
+        return True
+    return False
 
 
 def send_witch_poison_history(plugin_event, game, groupid):

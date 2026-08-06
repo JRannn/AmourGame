@@ -12,6 +12,11 @@ import random
 admin_list = [
 ]  # 除骰主外的本插件管理员qq号列表，按格式填写，修改记得重载
 gamelock = threading.Lock()
+DEFAULT_AUTO_SKIP_MINUTES = 3
+AUTO_SKIP_CHECK_SECONDS = 10
+AUTO_SKIP_THREAD_STARTED = False
+AUTO_SKIP_PLUGIN_EVENT = None
+AUTO_SKIP_THREAD_LOCK = threading.Lock()
 
 class Event(object):
     def init(plugin_event, Proc):
@@ -69,6 +74,7 @@ def pri_reply(plugin_event, Proc):
     dispatch_private_submission(plugin_event, data, uid, message)
 
 def reply(plugin_event, Proc):
+    start_auto_skip_thread(plugin_event)
     message = plugin_event.data.message
     groupid = str(plugin_event.data.group_id)
     uid = str(plugin_event.data.user_id)
@@ -77,6 +83,9 @@ def reply(plugin_event, Proc):
     masterlist = getMaster(tmp_botHash, platfrom)
     privategroup = getGroup("privategroup.json")
     data = get_daily_game_data()
+
+    if handle_auto_skip_command(plugin_event, data, groupid, uid, message):
+        return True
 
     if handle_appearance_order(
         plugin_event,
@@ -110,6 +119,7 @@ def reply(plugin_event, Proc):
             "playname": playname,
             "gamename": "晚间游戏",
             "上次报数时间": datetime.now().timestamp(),
+            "auto_skip_minutes": get_group_auto_skip_minutes(groupid),
             "个人": {str(i): {} for i in range(1, num + 1)}
         }
         setData("game.json", data)
@@ -141,11 +151,14 @@ def reply(plugin_event, Proc):
             "playname": playname,
             "gamename": gamename,
             "上次报数时间": timestamp,
+            "auto_skip_minutes": get_group_auto_skip_minutes(groupid),
             "个人": {str(i): {} for i in range(1, num+1)}
         }
         setData("game.json", data)
         plugin_event.reply("请参与者发送“坐 序号”入座。（发送“不坐 序号”取消）")
         send_open_game_hint(plugin_event, data, groupid, gamename)
+        apply_auto_skip_to_game(data, groupid)
+        setData("game.json", data)
         return True
 
     if message == "结束游戏":
@@ -453,6 +466,7 @@ def dispatch_game_message(plugin_event, data, groupid, uid, message, masterlist)
         game = {}
         data[groupid]["game"] = game
         setData("game.json", data)
+    apply_auto_skip_to_game(data, groupid)
     game_type = game.get("type")
 
     if check_round_timeout(plugin_event, data, groupid, game_type):
@@ -467,6 +481,136 @@ def dispatch_game_message(plugin_event, data, groupid, uid, message, masterlist)
         return False
     module = import_module(f".{module_name}", __package__)
     return module.handle(plugin_event, data, groupid, uid, message, masterlist)
+
+
+def start_auto_skip_thread(plugin_event):
+    global AUTO_SKIP_THREAD_STARTED, AUTO_SKIP_PLUGIN_EVENT
+    AUTO_SKIP_PLUGIN_EVENT = plugin_event
+    if AUTO_SKIP_THREAD_STARTED:
+        return
+    with AUTO_SKIP_THREAD_LOCK:
+        if AUTO_SKIP_THREAD_STARTED:
+            return
+        thread = threading.Thread(target=auto_skip_worker, daemon=True)
+        thread.start()
+        AUTO_SKIP_THREAD_STARTED = True
+
+
+def auto_skip_worker():
+    while True:
+        time.sleep(AUTO_SKIP_CHECK_SECONDS)
+        plugin_event = AUTO_SKIP_PLUGIN_EVENT
+        if plugin_event is None:
+            continue
+        try:
+            data = get_daily_game_data()
+            changed = False
+            for groupid, group_data in list(data.items()):
+                if not isinstance(group_data, dict):
+                    continue
+                game = group_data.get("game", {})
+                if not isinstance(game, dict):
+                    continue
+                game_type = game.get("type")
+                if not game_type or game.get("phase") == "ended":
+                    continue
+                if get_auto_skip_minutes(data, groupid) <= 0:
+                    continue
+                if apply_auto_skip_to_game(data, groupid):
+                    changed = True
+                target_event = GameAutoSkipEvent(plugin_event, groupid)
+                if check_round_timeout(target_event, data, groupid, game_type):
+                    changed = False
+            if changed:
+                setData("game.json", data)
+        except Exception:
+            continue
+
+
+class GameAutoSkipEvent:
+    def __init__(self, plugin_event, groupid):
+        self._plugin_event = plugin_event
+        self._groupid = groupid
+
+    def __getattr__(self, name):
+        return getattr(self._plugin_event, name)
+
+    def reply(self, message):
+        return self._plugin_event.send("group", self._groupid, message)
+
+
+def get_game_meta():
+    meta = getData("game_meta.json")
+    if not isinstance(meta, dict):
+        meta = {}
+    meta.setdefault("auto_skip_groups", {})
+    return meta
+
+
+def get_group_auto_skip_minutes(groupid):
+    meta = get_game_meta()
+    groups = meta.get("auto_skip_groups", {})
+    value = groups.get(str(groupid), DEFAULT_AUTO_SKIP_MINUTES)
+    try:
+        return max(0, float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_AUTO_SKIP_MINUTES
+
+
+def get_auto_skip_minutes(data, groupid):
+    group_data = data.get(str(groupid), {})
+    if isinstance(group_data, dict) and "auto_skip_minutes" in group_data:
+        try:
+            return max(0, float(group_data.get("auto_skip_minutes")))
+        except (TypeError, ValueError):
+            pass
+    return get_group_auto_skip_minutes(groupid)
+
+
+def apply_auto_skip_to_game(data, groupid):
+    group_data = data.get(str(groupid), {})
+    if not isinstance(group_data, dict):
+        return False
+    game = group_data.get("game", {})
+    if not isinstance(game, dict):
+        return False
+    minutes = get_auto_skip_minutes(data, groupid)
+    seconds = int(minutes * 60) if minutes > 0 else 0
+    if game.get("auto_skip_seconds") == seconds:
+        return False
+    game["auto_skip_seconds"] = seconds
+    return True
+
+
+def format_auto_skip_minutes(minutes):
+    if minutes <= 0:
+        return "已关闭"
+    if float(minutes).is_integer():
+        return f"{int(minutes)}分钟"
+    return f"{minutes:g}分钟"
+
+
+def handle_auto_skip_command(plugin_event, data, groupid, uid, message):
+    text = str(message).strip()
+    if text in ("关闭自动跳过", "自动跳过关闭"):
+        minutes = 0
+    else:
+        match = re.fullmatch(r"(?:设置)?自动跳过\s*(\d+(?:\.\d+)?)\s*(?:分钟|分)?", text)
+        if not match:
+            return False
+        minutes = float(match.group(1))
+        if minutes <= 0:
+            plugin_event.reply("自动跳过时间必须大于0分钟；如需关闭请发送：关闭自动跳过")
+            return True
+    meta = get_game_meta()
+    meta.setdefault("auto_skip_groups", {})[str(groupid)] = minutes
+    setData("game_meta.json", meta)
+    if groupid in data and isinstance(data[groupid], dict):
+        data[groupid]["auto_skip_minutes"] = minutes
+        apply_auto_skip_to_game(data, groupid)
+        setData("game.json", data)
+    plugin_event.reply(f"本群游戏自动跳过：{format_auto_skip_minutes(minutes)}")
+    return True
 
 def get_command_module(message):
     if message.startswith(("开始数字炸弹", "开始女巫毒药", "放毒")):
@@ -486,6 +630,8 @@ def handle_game_ready(plugin_event, data, groupid, gamename):
         start_configured_game(plugin_event, data, groupid, gamename)
         return
     send_open_game_hint(plugin_event, data, groupid, gamename)
+    apply_auto_skip_to_game(data, groupid)
+    setData("game.json", data)
 
 def send_open_game_hint(plugin_event, data, groupid, gamename):
     if gamename == "数字炸弹":
@@ -527,7 +673,7 @@ def send_game_manual(plugin_event, groupid):
             "[投稿类]\n女巫毒药、偏执狂、你画我猜、国王游戏、两真一假、两假一真\n\n"
             "1. 本插件没有检验管理员权限，“管理员”仅指代带游戏者。\n"
             "2. 投稿类游戏：开启→入座→个人群提交题目→自动开始，或管理员直接开始游戏。\n"
-            "3. 每轮超过三分钟后，机器人再接收到群内消息，会自动进入下一轮。【一直没人说话需要管理员手动跳过一下】\n"
+            "3. 默认每轮3分钟后自动跳过；可发送「设置自动跳过 分钟数」修改，发送「关闭自动跳过」关闭。\n"
             "4. 每日自动清空之前的游戏数据。"
         ),
         (
@@ -539,6 +685,7 @@ def send_game_manual(plugin_event, groupid):
             "-❗️开启游戏和晚间游戏指令二选一，不是先晚间游戏再开启游戏。"
             "⭐直接开始游戏（未坐满直接开始）\n"
             "⭐跳过（结束当前回合）\n"
+            "⭐设置自动跳过 3/关闭自动跳过\n"
             "⭐计分（查看当前分数）\n"
             "⭐查看座位 / 结束游戏"
         ),
@@ -571,7 +718,7 @@ def send_game_manual(plugin_event, groupid):
         (
             "【偏执狂】\n"
             "开启游戏后，玩家私聊/个人群发送：偏执狂 问题内容\n"
-            "每轮玩家公屏回答后，想看题的其他玩家三分钟内发送：喝\n\n"
+            "每轮玩家公屏回答后，想看题的其他玩家需在自动跳过时间内发送：喝\n\n"
             "【你画我猜】\n"
             "开启游戏后，玩家提前私聊/个人群发送：你画我猜 答案\n"
             "每轮玩家自行发送画作，其他人发送答案抢答，第一个答对的人 +1 分。\n\n"
@@ -635,8 +782,13 @@ def start_configured_game(plugin_event, data, groupid, gamename):
     elif gamename == "你画我猜":
         from .draw_guess import start_draw_guess
         plugin_event.reply(start_draw_guess(data, groupid))
+    apply_auto_skip_to_game(data, groupid)
+    setData("game.json", data)
 
 def check_round_timeout(plugin_event, data, groupid, game_type):
+    if game_type in ["数字炸弹", "女巫毒药"]:
+        from .bomb import check_timeout
+        return check_timeout(plugin_event, data, groupid)
     if game_type == "偏执狂":
         from .paranoia import check_timeout
         return check_timeout(plugin_event, data, groupid)

@@ -173,7 +173,7 @@ def check_timeout(plugin_event, data, groupid):
     game = data[groupid].get("game", {})
     if game.get("type") != GAME_TYPE or not engine.is_round_timeout(game):
         return False
-    plugin_event.reply("本轮已超过三分钟，自动跳过。")
+    plugin_event.reply(f"本轮已超过{engine.round_timeout_minutes_text(game)}，自动跳过。")
     finish_round(plugin_event, data, groupid, force=True)
     return True
 

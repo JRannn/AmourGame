@@ -160,8 +160,34 @@ def mark_round_start(game):
 
 
 def is_round_timeout(game, seconds=180):
+    seconds = game.get("auto_skip_seconds", seconds)
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        seconds = 180
+    if seconds <= 0:
+        return False
     start = game.get("round_start_time", 0)
     return bool(start) and time.time() - start > seconds
+
+
+def round_timeout_seconds(game, default=180):
+    seconds = game.get("auto_skip_seconds", default)
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        seconds = default
+    return max(0, seconds)
+
+
+def round_timeout_minutes_text(game, default=180):
+    seconds = round_timeout_seconds(game, default)
+    if seconds <= 0:
+        return "自动跳过已关闭"
+    minutes = seconds / 60
+    if minutes.is_integer():
+        return f"{int(minutes)}分钟"
+    return f"{minutes:g}分钟"
 
 
 def finish_game(data, groupid, keep_type=True):

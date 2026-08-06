@@ -45,9 +45,20 @@ def check_timeout(plugin_event, data, groupid):
     game = data[groupid].get("game", {})
     if game.get("type") != GAME_TYPE:
         return False
-    if game.get("phase") == "drink" and time.time() - game.get("last_answer_time", 0) > 180:
-        next_paranoia_round(plugin_event, data, groupid, groupid)
-        return True
+    timeout_seconds = engine.round_timeout_seconds(game)
+    if timeout_seconds > 0:
+        if (
+            game.get("phase") == "answer"
+            and engine.is_round_timeout(game)
+        ):
+            next_paranoia_round(plugin_event, data, groupid, groupid)
+            return True
+        if (
+            game.get("phase") == "drink"
+            and time.time() - game.get("last_answer_time", 0) > timeout_seconds
+        ):
+            next_paranoia_round(plugin_event, data, groupid, groupid)
+            return True
     return False
 
 
@@ -74,7 +85,12 @@ def handle_paranoia_playgroup(plugin_event, data, groupid, uid, message):
         return True
     if "phase" not in game:
         return False
-    if game["phase"] == "drink" and time.time() - game["last_answer_time"] > 180:
+    timeout_seconds = engine.round_timeout_seconds(game)
+    if (
+        timeout_seconds > 0
+        and game["phase"] == "drink"
+        and time.time() - game["last_answer_time"] > timeout_seconds
+    ):
         next_paranoia_round(plugin_event, data, groupid, groupid)
         return False
     elif message == "喝":
@@ -171,6 +187,7 @@ def start_paranoia_round(plugin_event, data, play_group):
     target_name = target_item["name"]
     game["phase"] = "answer"
     game.setdefault("used_questioners", []).append(str(q_item["uid"]))
+    engine.mark_round_start(game)
 
     setData("game.json", data)
 
@@ -196,14 +213,15 @@ def handle_paranoia_answer(plugin_event, data, groupid, uid):
 
     setData("game.json", data)
     name = data[groupid]["个人"][game["current_target"]]["name"]
-    plugin_event.reply(f"{name} 已回答！想知道答案请在三分钟内发送：喝（不要加名字，只发一个字喝）")
+    plugin_event.reply(f"{name} 已回答！想知道答案请在{engine.round_timeout_minutes_text(game)}内发送：喝（不要加名字，只发一个字喝）")
     return 1
 
 def handle_drink(plugin_event, data, groupid, uid):
     game = data[groupid].get("game")
     if game["phase"] != "drink":
         return
-    if time.time() - game["last_answer_time"] > 180:
+    timeout_seconds = engine.round_timeout_seconds(game)
+    if timeout_seconds <= 0 or time.time() - game["last_answer_time"] > timeout_seconds:
         return
 
     game["drinkers"][uid] = game["drinkers"].get(uid, 0) + 1
