@@ -556,17 +556,144 @@ def _notice_setting_items(value):
     ]
 
 
+NOTICE_PROBABILITY_TARGETS = {
+    "戏群": "play_group",
+    "嘉宾群": "random_guest_group",
+    "个人群": "random_guest_group",
+    "专属群": "exclusive_group",
+}
+
+
+def _notice_probability_text(config):
+    rules = config.get("probability_rules") if isinstance(config, dict) else None
+    target_names = {
+        "play_group": "戏群",
+        "random_guest_group": "嘉宾群",
+        "personal_group": "嘉宾群",
+        "exclusive_group": "专属群",
+    }
+    if isinstance(rules, list) and rules:
+        return " ".join(
+            f"{target_names.get(rule.get('target'), rule.get('target'))}{float(rule.get('probability', 0) or 0):g}"
+            for rule in rules
+        )
+    probability = config.get("probability") if isinstance(config, dict) else None
+    return f"{float(probability):g}" if probability is not None else "0-1"
+
+
+def _notice_parse_probability_rules(value):
+    value = str(value or "").strip()
+    if re.fullmatch(r"[01](?:\.\d*)?|0?\.\d+", value):
+        probability = float(value)
+        if not 0 <= probability <= 1:
+            return None, "通报概率必须填写0到1之间的数字。"
+        return [{"target": "play_group", "probability": probability}], None
+    rules = []
+    seen_targets = set()
+    total_probability = 0.0
+    for match in re.finditer(
+        r"(戏群|嘉宾群|个人群|专属群)\s*(?:概率)?\s*([01](?:\.\d*)?|0?\.\d+)",
+        value,
+    ):
+        target_label = match.group(1)
+        target = NOTICE_PROBABILITY_TARGETS[target_label]
+        probability = float(match.group(2))
+        if target in seen_targets:
+            return None, f"{target_label}重复设置了，请合并成一项。"
+        seen_targets.add(target)
+        if probability > 0:
+            rules.append({"target": target, "probability": probability})
+            total_probability += probability
+    if not rules:
+        return None, "通报概率请填写数字，或按「戏群0.2 嘉宾群0.3 专属群0.1」填写。"
+    if total_probability > 1:
+        return None, "通报概率总和不能超过1。"
+    return rules, None
+
+
+def _notice_choose_rule(config):
+    rules = config.get("probability_rules")
+    if not isinstance(rules, list):
+        try:
+            probability = float(config.get("probability", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        rules = [{"target": "play_group", "probability": probability}]
+    roll = random.random()
+    cumulative = 0.0
+    for rule in rules:
+        probability = float(rule.get("probability", 0) or 0)
+        cumulative += probability
+        if roll < cumulative:
+            return rule
+    return None
+
+
+def _notice_pick_random_guest_group(playname, excluded_uids, privategroup):
+    excluded_uids = {str(item) for item in excluded_uids if str(item) != "官方"}
+    groups = []
+    for guest_uid, info in privategroup.get(playname, {}).items():
+        guest_uid = str(guest_uid)
+        if not guest_uid.isdigit() or guest_uid in excluded_uids:
+            continue
+        if not isinstance(info, dict):
+            continue
+        group_id = info.get("个人群号") or info.get("NPC群号")
+        if group_id:
+            groups.append(str(group_id))
+    return random.choice(groups) if groups else ""
+
+
+def _notice_pick_exclusive_group(core, playname, participant_uids):
+    limit_data = core.getData("sendmessage", "limit.json")
+    candidates = []
+    for participant_uid in participant_uids:
+        group_id = core._drop_pick_exclusive_group(
+            limit_data,
+            playname,
+            str(participant_uid),
+        )
+        if group_id:
+            candidates.append(group_id)
+    return random.choice(candidates) if candidates else ""
+
+
+def _notice_send_by_rule(core, plugin_event, playname, rule, play_group, privategroup, participant_uids, message):
+    target = rule.get("target")
+    if target == "play_group":
+        if not play_group:
+            return False, "未设置戏群群号"
+        plugin_event.send("group", play_group, message)
+        return True, "戏群"
+    if target in ("random_guest_group", "personal_group"):
+        group_id = _notice_pick_random_guest_group(
+            playname,
+            participant_uids,
+            privategroup,
+        )
+        if not group_id:
+            return False, "未找到可用嘉宾群"
+        plugin_event.send("group", group_id, message)
+        return True, "嘉宾群"
+    if target == "exclusive_group":
+        group_id = _notice_pick_exclusive_group(core, playname, participant_uids)
+        if not group_id:
+            return False, "未找到可用专属群"
+        plugin_event.send("group", group_id, message)
+        return True, "专属群"
+    return False, "未知通报目标"
+
+
 def _notice_setting_text(playname, config=None):
     config = config if isinstance(config, dict) else {}
     playtypes = config.get("playtypes")
     time_ranges = config.get("time_ranges")
-    probability = config.get("probability")
     target = config.get("target")
     return (
         f"通报设置 {playname}\n"
         f"通报类型：{' '.join(playtypes) if isinstance(playtypes, list) else '私约 电话'}\n"
         f"通报时间段：{' '.join(time_ranges) if isinstance(time_ranges, list) else '20:00-23:00'}\n"
-        f"通报概率：{f'{float(probability):g}' if probability is not None else '0-1'}\n"
+        f"通报概率：{_notice_probability_text(config)}\n"
         f"通报对象：{int(target) if target is not None else 1}"
     )
 
@@ -620,12 +747,11 @@ def _handle_notice_setting(plugin_event, text, uid, groupid, masterlist):
             f"通报时间段格式错误：{'、'.join(invalid_ranges)}。"
         )
         return True
-    try:
-        probability = float(values["通报概率"])
-    except ValueError:
-        probability = -1
-    if not 0 <= probability <= 1:
-        plugin_event.reply("通报概率必须填写0到1之间的数字。")
+    probability_rules, probability_error = _notice_parse_probability_rules(
+        values["通报概率"]
+    )
+    if probability_error:
+        plugin_event.reply(probability_error)
         return True
     if values["通报对象"] not in {"1", "2", "3", "4", "5"}:
         plugin_event.reply("通报对象只能填写1、2、3、4或5。")
@@ -634,7 +760,10 @@ def _handle_notice_setting(plugin_event, text, uid, groupid, masterlist):
     settings[playname] = {
         "playtypes": playtypes,
         "time_ranges": time_ranges,
-        "probability": probability,
+        "probability_rules": probability_rules,
+        "probability": probability_rules[0]["probability"]
+        if len(probability_rules) == 1 and probability_rules[0]["target"] == "play_group"
+        else 0,
         "target": int(values["通报对象"]),
     }
     core.setData("engagement", "notice.json", settings)
@@ -687,11 +816,15 @@ def _maybe_send_appointment_notice(
         for start, end in configured_ranges
     ):
         return
-    try:
-        probability = float(config.get("probability", 0) or 0)
-    except (TypeError, ValueError):
-        return
-    if probability <= 0:
+    has_probability = any(
+        float(rule.get("probability", 0) or 0) > 0
+        for rule in (
+            config.get("probability_rules")
+            if isinstance(config.get("probability_rules"), list)
+            else [{"probability": config.get("probability", 0)}]
+        )
+    )
+    if not has_probability:
         return
 
     def display_name(target_uid):
@@ -747,28 +880,36 @@ def _maybe_send_appointment_notice(
         return
     register = core.getData("groupcollection", "register.json")
     play_group = str(register.get(playname, {}).get("play_group", "")).strip()
-    if not play_group:
-        plugin_event.reply(
-            f"「{playname}」的通报条件已命中，但未设置戏群群号，"
-            "无法发送出门通报。"
-        )
-        return
     start_time = playtime_parts[1].split("-", 1)[0]
+    all_participant_uids = []
+    if str(inviter) != "官方":
+        all_participant_uids.append(str(inviter))
+    for invitee_uid in invitees or []:
+        invitee_uid = str(invitee_uid)
+        if invitee_uid not in all_participant_uids:
+            all_participant_uids.append(invitee_uid)
     if target == 5:
         send_errors = []
         for participant_uid, participant_name, is_invitee in participants_for_roll:
-            participant_roll = random.randint(1, 100)
-            if participant_roll > probability * 100:
+            rule = _notice_choose_rule(config)
+            if not rule:
                 continue
             try:
-                plugin_event.send(
-                    "group",
+                ok, target_label = _notice_send_by_rule(
+                    core,
+                    plugin_event,
+                    playname,
+                    rule,
                     play_group,
+                    privategroup,
+                    all_participant_uids,
                     f"{participant_name}于{start_time}出门啦~",
                 )
+                if not ok:
+                    send_errors.append(f"{participant_name}：{target_label}")
+                    continue
                 result_text = (
-                    f"1D100={participant_roll}，判定失败，"
-                    "已于戏群通报！"
+                    f"判定失败，已于{target_label}通报！"
                 )
                 if is_invitee:
                     participant_info = privategroup.get(playname, {}).get(
@@ -796,15 +937,29 @@ def _maybe_send_appointment_notice(
             )
         return
 
-    roll = random.randint(1, 100)
-    if roll > probability * 100:
+    rule = _notice_choose_rule(config)
+    if not rule:
         return
     try:
-        plugin_event.send("group", play_group, f"{subject}于{start_time}出门啦~")
-        plugin_event.reply(f"1D100={roll}，判定失败，已于戏群通报！")
+        ok, target_label = _notice_send_by_rule(
+            core,
+            plugin_event,
+            playname,
+            rule,
+            play_group,
+            privategroup,
+            all_participant_uids,
+            f"{subject}于{start_time}出门啦~",
+        )
+        if not ok:
+            plugin_event.reply(
+                f"「{playname}」的通报条件已命中，但{target_label}，无法发送出门通报。"
+            )
+            return
+        plugin_event.reply(f"判定失败，已于{target_label}通报！")
     except Exception as error:
         plugin_event.reply(
-            f"出门通报发送失败：{error}\n目标戏群：{play_group}"
+            f"出门通报发送失败：{error}"
         )
         return
 
@@ -819,6 +974,8 @@ def _monitor_remind(plugin_event, playname):
     targets = []
     for code, appointment in appoint.items():
         if appointment.get("playname") != playname:
+            continue
+        if appointment.get("playtype") == "微信":
             continue
         group_id = str(appointment.get("group", ""))
         if not group_id.isdigit():
