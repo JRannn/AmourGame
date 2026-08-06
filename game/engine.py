@@ -66,7 +66,7 @@ def uid_name(data, groupid, uid, fallback=None):
 
 
 def at(uid):
-    return f"[OP:at,id={uid}]"
+    return f"[OP:at,id={uid}] "
 
 
 def find_play_group(data, uid, game_type=None):

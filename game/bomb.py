@@ -216,7 +216,7 @@ def skip_number_bomb(plugin_event, data, groupid):
     name = current_player.get('name', f'{turn}号')
     plugin_event.reply(
         f"{name} 已被跳过！\n"
-        f"[OP:at,id={next_player}]请在{game['low']}~{game['high']}中选择，直接发送你选择的数字即可。"
+        f"[OP:at,id={next_player}] 请在{game['low']}~{game['high']}中选择，直接发送你选择的数字即可。"
     )
     return
 

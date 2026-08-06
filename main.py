@@ -466,6 +466,11 @@ def dispatch_embedded_module_event(event_name, plugin_event, Proc):
             continue
         try:
             module = __import__(f"AmourGame.{module_name}", fromlist=[handler_name])
+        except ModuleNotFoundError as e:
+            if e.name == f"AmourGame.{module_name}":
+                continue
+            raise
+        try:
             event_handler = getattr(module, handler_name, None)
             if event_handler:
                 event_handler(plugin_event, Proc)
