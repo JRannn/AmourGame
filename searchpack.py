@@ -22,7 +22,7 @@ searchpacklock = threading.Lock()
 
 def reply(plugin_event, Proc):
     message = plugin_event.data.message
-    groupid = str(plugin_event.data.group_id)
+    groupid = str(getattr(plugin_event.data, "group_id", ""))
     uid = str(plugin_event.data.user_id)
     bot_id = str(plugin_event.bot_info.id)
     sender = plugin_event.data.sender["name"]

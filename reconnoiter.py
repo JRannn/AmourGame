@@ -43,7 +43,7 @@ def set_global_switch(value):
 
 def reply(plugin_event, Proc):
     message = plugin_event.data.message
-    groupid = str(plugin_event.data.group_id)
+    groupid = str(getattr(plugin_event.data, "group_id", ""))
     uid = str(plugin_event.data.user_id)
     pcname = getPcName(uid, "qq", groupid, plugin_event.data.sender["name"])
     platfrom = plugin_event.platform["platform"]
