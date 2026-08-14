@@ -31,14 +31,24 @@ reconnoiter_switch = 0
 
 def init_after(plugin_event, Proc):
     global reconnoiter_switch
-    backpack = getData("backpack.json")
-    reconnoiter_switch = int(backpack.get("_global_switch", 0) or 0)
+    config = getData("config.json")
+    if "global_switch" not in config:
+        backpack = getData("backpack.json")
+        if "_global_switch" in backpack:
+            config["global_switch"] = int(backpack.pop("_global_switch", 0) or 0)
+            setData("backpack.json", backpack)
+            setData("config.json", config)
+    reconnoiter_switch = int(config.get("global_switch", 0) or 0)
 
 
 def set_global_switch(value):
+    config = getData("config.json")
+    config["global_switch"] = int(value)
+    setData("config.json", config)
     backpack = getData("backpack.json")
-    backpack["_global_switch"] = int(value)
-    setData("backpack.json", backpack)
+    if "_global_switch" in backpack:
+        backpack.pop("_global_switch", None)
+        setData("backpack.json", backpack)
 
 
 def reply(plugin_event, Proc):
