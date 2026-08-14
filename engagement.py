@@ -104,7 +104,7 @@ def monitor_appointment_message(plugin_event, message, uid, groupid):
             )
             if changed_round:
                 user_stats["rounds"] = int(user_stats.get("rounds", 0)) + 1
-                if previous_uid:
+                if previous_uid and arc_minutes > 0:
                     user_stats["total_minutes"] = (
                         int(user_stats.get("total_minutes", 0)) + arc_minutes
                     )
@@ -227,10 +227,12 @@ def handle_recalled_message(plugin_event):
                 if changed_round:
                     user_stats["rounds"] += 1
                     if previous_uid and previous_time and item_time:
-                        user_stats["total_minutes"] += core._monitor_arc_minutes(
+                        arc_minutes = core._monitor_arc_minutes(
                             previous_time, item_time, excluded_time
                         )
-                        user_stats["response_count"] += 1
+                        if arc_minutes > 0:
+                            user_stats["total_minutes"] += arc_minutes
+                            user_stats["response_count"] += 1
                 if qualifies:
                     previous_uid = item_uid
                     previous_time = item_time
