@@ -31,9 +31,14 @@ reconnoiter_switch = 0
 
 def init_after(plugin_event, Proc):
     global reconnoiter_switch
-    reconnoiter_switch = Proc.database.get_basic_config(
-        "reconnoiter", "switch", 0, pkl=False
-    )
+    backpack = getData("backpack.json")
+    reconnoiter_switch = int(backpack.get("_global_switch", 0) or 0)
+
+
+def set_global_switch(value):
+    backpack = getData("backpack.json")
+    backpack["_global_switch"] = int(value)
+    setData("backpack.json", backpack)
 
 
 def reply(plugin_event, Proc):
@@ -62,9 +67,7 @@ def reply(plugin_event, Proc):
             plugin_event.reply("背包插件启用成功")
         else:
             plugin_event.reply("背包插件已开启，无需重复开启")
-        Proc.database.set_basic_config(
-            "reconnoiter", "switch", reconnoiter_switch, pkl=False
-        )
+        set_global_switch(reconnoiter_switch)
         return
     elif message == "关闭背包插件":
         # 如果uid不在骰主列表并且不在本插件管理员列表，则拒绝
@@ -76,9 +79,7 @@ def reply(plugin_event, Proc):
             plugin_event.reply("背包插件关闭成功")
         else:
             plugin_event.reply("背包插件未开启，无需关闭")
-        Proc.database.set_basic_config(
-            "reconnoiter", "switch", reconnoiter_switch, pkl=False
-        )
+        set_global_switch(reconnoiter_switch)
         return
     if reconnoiter_switch == 0:
         return

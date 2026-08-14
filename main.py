@@ -456,6 +456,7 @@ class Event(object):
 EMBEDDED_MODULE_HANDLERS = (
     ("ArchiveV2_1_0", {"group_message": "reply"}),
     ("reconnoiter", {"init_after": "init_after", "group_message": "reply"}),
+    ("searchpack", {"group_message": "reply"}),
 )
 
 
