@@ -19,6 +19,7 @@ import time
 import OlivOS
 import OlivaDiceCore
 from OlivOS import API as API
+import hashlib
 import json
 import re
 import os
@@ -84,12 +85,28 @@ def _collection_file(playname, collection_item):
     return f"{safe_playname}_{safe_item}.json"
 
 
+def _normalize_collection_text(value):
+    return re.sub(r"\s+", "", str(value or "")).replace("，", ",")
+
+
+def _collection_cut_index(text, normalized_length):
+    """返回 text 中第 normalized_length 个非空白字符之后的下标。"""
+    count = 0
+    for index, char in enumerate(text):
+        if char.isspace():
+            continue
+        count += 1
+        if count >= normalized_length:
+            return index + 1
+    return len(text)
+
+
 def _match_collection_command(command_text, register):
-    command_text = re.sub(r"\s+", "", str(command_text or ""))
+    command_text = _normalize_collection_text(command_text)
     matches = []
     for playname in register:
         for item in _get_collection_items(register, playname):
-            if command_text == re.sub(r"\s+", "", f"{playname}{item}"):
+            if command_text == _normalize_collection_text(f"{playname}{item}"):
                 matches.append((playname, item))
     if not matches:
         return None, None
@@ -98,12 +115,38 @@ def _match_collection_command(command_text, register):
 
 
 def _parse_collection_delete_message(message):
-    match = re.match(r"删除\s*(.+?)[，,]\s*(.+)", message)
-    if not match:
+    text = str(message or "").strip()
+    if not text.startswith("删除"):
         return None, None, None
+    body = text[len("删除") :].lstrip()
+    if not body:
+        return None, None, None
+    body_normalized = _normalize_collection_text(body)
     register = getData("groupcollection", "register.json")
-    playname, collection_item = _match_collection_command(match.group(1), register)
-    return playname, collection_item, match.group(2).strip()
+    matches = []
+    for playname in register:
+        for item in _get_collection_items(register, playname):
+            prefix_normalized = _normalize_collection_text(f"{playname}{item}")
+            if not prefix_normalized or not body_normalized.startswith(
+                prefix_normalized
+            ):
+                continue
+            cut = _collection_cut_index(body, len(prefix_normalized))
+            rest_match = re.match(r"\s*[，,]\s*(.+)", body[cut:], re.DOTALL)
+            if rest_match:
+                matches.append(
+                    (
+                        len(prefix_normalized),
+                        playname,
+                        item,
+                        rest_match.group(1).strip(),
+                    )
+                )
+    if not matches:
+        return None, None, None
+    matches.sort(key=lambda match: match[0], reverse=True)
+    _, playname, collection_item, target_name = matches[0]
+    return playname, collection_item, target_name
 
 
 def _parse_collection_view_message(message):
@@ -115,6 +158,18 @@ def _parse_collection_view_message(message):
     return playname, collection_item, match.group(2)
 
 
+def _parse_collection_random_number_message(message):
+    text = str(message or "").strip()
+    if not text.endswith("随机编号"):
+        return None, None
+    prefix = text[: -len("随机编号")].strip()
+    if not prefix:
+        return None, None
+    register = getData("groupcollection", "register.json")
+    playname, collection_item = _match_collection_command(prefix, register)
+    return playname, collection_item
+
+
 def _collection_format_text(playname, guest_name, collection_items):
     texts = []
     for item in collection_items:
@@ -124,9 +179,9 @@ def _collection_format_text(playname, guest_name, collection_items):
             f"内容："
         )
         if item == "公知":
-            detail += f"\n\n【说明】\n所有嘉宾上传完毕后，发送「{playname}{item}@骰子」可查看{item}合集。\n{item}可带1张图，附在末尾。"
+            detail += f"\n\n【说明】\n所有嘉宾上传完毕后，发送「{playname}{item}@骰子」可查看{item}合集。\n{item}可带1张图，附在末尾。\n骰主可在姓名后@对方代提交。"
         else:
-            detail += f"\n\n【说明】\n{item}可带1张图，附在末尾。\n除公知外，其他收集项仅后台可查看。"
+            detail += f"\n\n【说明】\n{item}可带1张图，附在末尾。\n除公知外，其他收集项仅后台可查看。\n骰主可在姓名后@对方代提交。"
         texts.append(detail)
     return "\n\n".join(texts)
 
@@ -1392,15 +1447,9 @@ def reply(plugin_event, Proc, is_group):
                                 if part.startswith("[CQ:image") or part.startswith(
                                     "[OP:image"
                                 ):
-                                    file_match = re.search(r"file=([^,\]]+)", part)
-                                    if file_match:
-                                        file_value = file_match.group(1)
-                                        segments.append(
-                                            {
-                                                "type": "image",
-                                                "data": {"file": file_value},
-                                            }
-                                        )
+                                    image_segment = _image_segment_from_text(part)
+                                    if image_segment:
+                                        segments.append(image_segment)
                                 elif part:
                                     segments.append(
                                         {"type": "text", "data": {"text": part}}
@@ -7214,6 +7263,9 @@ def reply(plugin_event, Proc, is_group):
         collection_view_text = "\n".join(
             f"{replace_playname}{item}@骰子" for item in collection_items
         )
+        collection_random_text = "\n".join(
+            f"{replace_playname}{item} 随机编号" for item in collection_items
+        )
         collection_delete_text = "\n".join(
             f"删除{replace_playname}{item}，xxx" for item in collection_items
         )
@@ -7246,7 +7298,7 @@ def reply(plugin_event, Proc, is_group):
             f"录入嘉宾性别 {replace_playname}\n\n【说明】\n获取嘉宾列表，填写后整张表发送回后台群保存。\n。性别可填写任意内容（包括不同身份），“拉取异性随机官约”会按照不同内容进行分组。",
             f"拉取随机官约/拉取异性随机官约 {replace_playname} D0 19:00-20:00\n\n【说明】\n将非NPC嘉宾随机两两配对并创建官约小群。\n“拉取异性随机官约”会根据已录入的嘉宾性别随机配对，未录入性别的嘉宾会被跳过。",
             f"{replace_playname}设置收集项 公知 收集内容2 收集内容3\n\n【说明】\n设置本场恋综可上传的收集项，即使不填写公知也会自动开启公知收集。\n本指令会覆盖当前收集项；想保留的项目每次都要写上，未写的项目会被关闭。\n关闭不会删除已上传内容，但关闭期间无法通过查看指令查看或上传；重新开启后可继续查看原内容。",
-            f"{collection_view_text}\n\n【说明】\n在后台群发送，可查看对应收集项合集与收集进度。\n除公知外，其他收集项仅后台可查看。",
+            f"{collection_view_text}\n{collection_random_text}\n\n【说明】\n在后台群发送查看指令，可查看对应收集项合集与收集进度。\n在后台群发送随机编号指令，可匿名随机编号并显示姓名对应关系；如已录入性别则自动按性别分组。\n除公知外，其他收集项仅后台可查看。",
             f"{collection_delete_text}\n\n【说明】\nxxx为嘉宾/NPC姓名。",
             f"{replace_playname} 删除关系线 张三 李四\n\n【说明】\n空格隔开。",
             f"{replace_playname} 关系线截止日期 20260101",
@@ -7343,8 +7395,22 @@ def reply(plugin_event, Proc, is_group):
         if match:
             playname = match.group(1).strip()
             collection_item = match.group(2).strip()
-            sender_name = match.group(3).strip()
+            name_field = match.group(3).strip()
             content = match.group(4).strip()
+            target_uid = uid
+            is_admin_input = False
+            at_match = re.search(r"\[OP:at,id=(\d+)\]", name_field)
+            if at_match:
+                if uid not in masterlist:
+                    plugin_event.reply("仅骰主权限可代提交收集项。")
+                    return
+                target_uid = at_match.group(1)
+                sender_name = re.sub(
+                    r"\[OP:at,id=\d+\]\s*", "", name_field
+                ).strip()
+                is_admin_input = True
+            else:
+                sender_name = name_field
             privategroup = getData("groupcollection", "privategroup.json")
             if playname not in privategroup:
                 plugin_event.reply(
@@ -7361,7 +7427,7 @@ def reply(plugin_event, Proc, is_group):
             registered_name = ""
             user_info = None
             for uid_in_file, info in privategroup[playname].items():
-                if uid_in_file == uid:
+                if uid_in_file == target_uid:
                     user_found = True
                     user_info = info
                     if "嘉宾姓名" in info:
@@ -7370,34 +7436,54 @@ def reply(plugin_event, Proc, is_group):
                         registered_name = info.get("NPC姓名", "")
                     break
             if not user_found:
-                plugin_event.reply(
-                    f"{sender}不是恋综「{playname}」的嘉宾或NPC，无法上传{collection_item}噢！"
-                )
+                if is_admin_input:
+                    plugin_event.reply(
+                        f"未找到被@的账号（{target_uid}）在恋综「{playname}」中的嘉宾/NPC登记信息，无法代提交。"
+                    )
+                else:
+                    plugin_event.reply(
+                        f"{sender}不是恋综「{playname}」的嘉宾或NPC，无法上传{collection_item}噢！"
+                    )
                 return
+            if is_admin_input and not sender_name:
+                sender_name = registered_name
             if sender_name != registered_name:
                 plugin_event.reply(
                     f"填写的姓名「{sender_name}」与注册的姓名「{registered_name}」不一致！\n请填写正确的姓名重新上传。\n\n<{playname}·{collection_item}>\n姓名：{registered_name}\n内容："
                 )
                 return
-            if playname in privategroup and uid in privategroup[playname]:
-                user_groupid = privategroup[playname][uid].get(
-                    "个人群号"
-                ) or privategroup[playname][uid].get("NPC群号")
-            if user_groupid != groupid:
-                plugin_event.reply(f"请前往个人群中上传{collection_item}噢！")
-                return
+            if not is_admin_input:
+                if playname in privategroup and uid in privategroup[playname]:
+                    user_groupid = privategroup[playname][uid].get(
+                        "个人群号"
+                    ) or privategroup[playname][uid].get("NPC群号")
+                if user_groupid != groupid:
+                    plugin_event.reply(f"请前往个人群中上传{collection_item}噢！")
+                    return
             public_file = _collection_file(playname, collection_item)
             public_data = getData("public", public_file)
-            if uid in public_data:
+            if target_uid in public_data:
                 plugin_event.reply(
                     f"{registered_name}已经上传过{collection_item}了！\n\n如需修改，请联系管理删除后重新上传。"
                 )
                 return
-            public_data[uid] = {"姓名": sender_name, "内容": content, "图片": image}
+            stored_image = image
+            if image:
+                cached_image = _resolve_image_file(image)
+                if cached_image:
+                    stored_image = f"[OP:image,file={cached_image}]"
+            public_data[target_uid] = {
+                "姓名": sender_name,
+                "内容": content,
+                "图片": stored_image,
+            }
             setData("public", public_file, public_data)
-            plugin_event.reply(
-                f"{collection_item}上传成功！"
-            )
+            if is_admin_input:
+                plugin_event.reply(
+                    f"已代「{registered_name}」提交{collection_item}！\n\n如需修改，请联系管理删除后重新提交。"
+                )
+            else:
+                plugin_event.reply(f"{collection_item}上传成功！")
             return
 
     elif _parse_collection_delete_message(message)[0]:
@@ -7472,6 +7558,115 @@ def reply(plugin_event, Proc, is_group):
                     pass
             return
 
+    elif _parse_collection_random_number_message(message)[0]:
+        playname, collection_item = _parse_collection_random_number_message(message)
+        if playname:
+            register = getData("groupcollection", "register.json")
+            privategroup = getData("groupcollection", "privategroup.json")
+            if playname not in privategroup:
+                plugin_event.reply(
+                    f"恋综「{playname}」未注册或已注销，请检查恋综名称噢！"
+                )
+                return
+            manage_group = register.get(playname, {}).get("manage_group")
+            if manage_group is None or str(groupid) != str(manage_group):
+                plugin_event.reply(
+                    f"请在恋综「{playname}」的后台群中使用随机编号。"
+                )
+                return
+            public_file = _collection_file(playname, collection_item)
+            public_data = getData("public", public_file)
+            entries = []
+            for uid_in_file, info in privategroup[playname].items():
+                if uid_in_file in public_data:
+                    entry_name = info.get("嘉宾姓名") or info.get("NPC姓名", "未知")
+                    entry_gender = str(info.get("性别", "")).strip()
+                    entry_content = public_data[uid_in_file].get("内容", "")
+                    entry_image = public_data[uid_in_file].get("图片", "")
+                    entries.append(
+                        {
+                            "uid": uid_in_file,
+                            "name": entry_name,
+                            "gender": entry_gender,
+                            "content": entry_content,
+                            "image": entry_image,
+                        }
+                    )
+            if not entries:
+                plugin_event.reply(
+                    f"恋综「{playname}」暂无任何{collection_item}内容！"
+                )
+                return
+            all_have_gender = all(e["gender"] for e in entries)
+            pid_to_number = {}
+            nodes_data = []
+
+            def _build_numbered_node(bot_id_val, number_val, content_val, image_val):
+                image_segment = _image_segment_from_text(image_val)
+                if image_segment:
+                    segs = [
+                        {
+                            "type": "text",
+                            "data": {"text": f"{number_val}：\n{content_val}"},
+                        },
+                        image_segment,
+                    ]
+                    return {"bot_id": bot_id_val, "content_list": segs}
+                return {
+                    "bot_id": bot_id_val,
+                    "content_text": f"{number_val}：\n{content_val}",
+                }
+
+            if all_have_gender:
+                gender_groups = {}
+                for e in entries:
+                    gender_groups.setdefault(e["gender"], []).append(e)
+                sorted_genders = sorted(gender_groups.keys())
+                counter = 1
+                for gender in sorted_genders:
+                    group_entries = gender_groups[gender]
+                    random.shuffle(group_entries)
+                    nodes_data.append(
+                        {
+                            "bot_id": bot_id,
+                            "content_text": f"{playname} {collection_item} {gender}：",
+                        }
+                    )
+                    for e in group_entries:
+                        pid_to_number[e["uid"]] = counter
+                        nodes_data.append(
+                            _build_numbered_node(
+                                bot_id, counter, e["content"], e["image"]
+                            )
+                        )
+                        counter += 1
+            else:
+                random.shuffle(entries)
+                nodes_data.append(
+                    {
+                        "bot_id": bot_id,
+                        "content_text": f"{playname} {collection_item}",
+                    }
+                )
+                for idx, e in enumerate(entries, start=1):
+                    pid_to_number[e["uid"]] = idx
+                    nodes_data.append(
+                        _build_numbered_node(bot_id, idx, e["content"], e["image"])
+                    )
+            result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+            if result.get("retcode") != 0:
+                plugin_event.reply(
+                    f"合并转发消息发送失败，请联系骰主：{result.get('message', '未知错误')}"
+                )
+                return
+            mapping_lines = []
+            for e in entries:
+                number = pid_to_number.get(e["uid"])
+                mapping_lines.append(f"{e['name']}：{number}")
+            time.sleep(1)
+            plugin_event.reply("\n".join(mapping_lines))
+            return
+
     elif _parse_collection_view_message(message)[0]:
         playname, collection_item, at_id = _parse_collection_view_message(message)
         if playname:
@@ -7530,22 +7725,20 @@ def reply(plugin_event, Proc, is_group):
                     upload_name = public_info.get("姓名", npc_name)
                     content = public_info.get("内容", "")
                     image = public_info.get("图片", "")
-                    segments = []
-                    segments.append(
-                        {"type": "text", "data": {"text": f"{npc_name}\n\n{content}"}}
-                    )
-                    if image:
-                        file_match = re.search(r"file=([^,\]]+)", image)
-                        if file_match:
-                            file_value = file_match.group(1)
-                            segments.append(
-                                {"type": "image", "data": {"file": file_value}}
-                            )
-                    if image:
+                    image_segment = _image_segment_from_text(image)
+                    if image_segment:
                         nodes_data.append(
                             {
                                 "bot_id": bot_id,
-                                "content_list": segments,  # 使用content_list而不是content_text
+                                "content_list": [
+                                    {
+                                        "type": "text",
+                                        "data": {
+                                            "text": f"{npc_name}\n\n{content}"
+                                        },
+                                    },
+                                    image_segment,
+                                ],
                             }
                         )
                     else:
@@ -7569,22 +7762,20 @@ def reply(plugin_event, Proc, is_group):
                     upload_name = public_info.get("姓名", guest_name)
                     content = public_info.get("内容", "")
                     image = public_info.get("图片", "")
-                    segments = []
-                    segments.append(
-                        {"type": "text", "data": {"text": f"{guest_name}\n\n{content}"}}
-                    )
-                    if image:
-                        file_match = re.search(r"file=([^,\]]+)", image)
-                        if file_match:
-                            file_value = file_match.group(1)
-                            segments.append(
-                                {"type": "image", "data": {"file": file_value}}
-                            )
-                    if image:
+                    image_segment = _image_segment_from_text(image)
+                    if image_segment:
                         nodes_data.append(
                             {
                                 "bot_id": bot_id,
-                                "content_list": segments,  # 使用content_list而不是content_text
+                                "content_list": [
+                                    {
+                                        "type": "text",
+                                        "data": {
+                                            "text": f"{guest_name}\n\n{content}"
+                                        },
+                                    },
+                                    image_segment,
+                                ],
                             }
                         )
                     else:
@@ -7598,6 +7789,11 @@ def reply(plugin_event, Proc, is_group):
                 plugin_event.reply(f"恋综「{playname}」暂无任何{collection_item}内容！")
                 return
             result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+            if result.get("retcode") != 0:
+                plugin_event.reply(
+                    f"合并转发消息发送失败，请联系骰主：{result.get('message', '未知错误')}"
+                )
+                return
             if is_manage_group:
                 total_guests = len(guest_uids)
                 uploaded_guests = total_guests - len(missing_guests)
@@ -7954,7 +8150,15 @@ def reply(plugin_event, Proc, is_group):
                     f"恋综「{playname}」{day_key}的日程已存在，如需修改请先删除原日程！"
                 )
                 return
-            existing_schedules[day_key] = {"文本": text_content, "图片": image_content}
+            stored_image = image_content
+            if image_content:
+                cached_image = _resolve_image_file(image_content)
+                if cached_image:
+                    stored_image = f"[OP:image,file={cached_image}]"
+            existing_schedules[day_key] = {
+                "文本": text_content,
+                "图片": stored_image,
+            }
             setData("routine", f"{playname}.json", existing_schedules)
             reply_msg = (
                 f"添加成功，正在发送至公告群！\n\n"
@@ -7967,8 +8171,8 @@ def reply(plugin_event, Proc, is_group):
                 notice_message = f"{day_key}日程\n\n"
                 if text_content:
                     notice_message += f"{text_content}\n\n"
-                if image_content:
-                    notice_message += f"{image_content}\n\n"
+                if stored_image:
+                    notice_message += f"{stored_image}\n\n"
                 notice_message += f"指令「{playname} 日程」查看日程合集"
                 plugin_event.send("group", notice_group, notice_message)
             else:
@@ -8061,30 +8265,25 @@ def reply(plugin_event, Proc, is_group):
             day_info = schedule_data[day_key]
             text_content = day_info.get("文本", "")
             image_content = day_info.get("图片", "")
-            if image_content:
-                segments = []
-                segments.append(
+            image_segment = _image_segment_from_text(image_content)
+            if image_segment:
+                segments = [
                     {"type": "text", "data": {"text": f"{day_key} 日程\n\n"}}
-                )
+                ]
                 if text_content:
                     segments.append(
                         {"type": "text", "data": {"text": f"{text_content}\n"}}
                     )
-                file_match = re.search(r"file=([^,\]]+)", image_content)
-                if file_match:
-                    file_value = file_match.group(1)
-                    segments.append({"type": "image", "data": {"file": file_value}})
-                else:
-                    segments.append(
-                        {"type": "text", "data": {"text": f"\n{image_content}"}}
-                    )
+                segments.append(image_segment)
                 nodes_data.append({"bot_id": bot_id, "content_list": segments})
             else:
                 content_text = f"{day_key} 日程\n\n"
                 if text_content:
                     content_text += f"{text_content}\n"
-                else:
-                    content_text += ""
+                if image_content and not re.search(
+                    r"\[(?:OP|CQ):image", image_content
+                ):
+                    content_text += f"\n{image_content}"
                 nodes_data.append(
                     {"bot_id": bot_id, "content_text": content_text.strip()}
                 )
@@ -10321,6 +10520,173 @@ def setData(plugin_name, filename, data):
             json.dump(data, w, indent=4, ensure_ascii=False)
 
 
+_IMAGE_CACHE_DIR = "./plugin/data/amourgame/images"
+_IMAGE_DOWNLOAD_FAILED = set()
+
+
+def _strip_file_scheme(value):
+    path = value[len("file://") :]
+    if re.match(r"^/[A-Za-z]:[\\/]", path):
+        path = path[1:]
+    return path
+
+
+def _find_local_image(value):
+    """按 OlivOS 工作目录和常见缓存目录补全相对路径；找不到返回 None。"""
+    if not value:
+        return None
+    path = value
+    if path.lower().startswith("file://"):
+        path = _strip_file_scheme(path)
+    if os.path.isabs(path):
+        return path if os.path.isfile(path) else None
+    bases = (
+        os.getcwd(),
+        "./data/images",
+        "./plugin/tmp",
+        "./plugin/data/images",
+    )
+    for base in bases:
+        candidate = os.path.abspath(os.path.join(base, path))
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _guess_image_ext(blob, content_type):
+    content_type = (content_type or "").lower()
+    if "png" in content_type:
+        return ".png"
+    if "gif" in content_type:
+        return ".gif"
+    if "webp" in content_type:
+        return ".webp"
+    if "jpeg" in content_type or "jpg" in content_type:
+        return ".jpg"
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if blob[:3] == b"GIF":
+        return ".gif"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return ".jpg"
+
+
+def _download_image_to_cache(url):
+    """由插件自己下载远程图片并缓存到本地，返回绝对路径；失败返回 None。
+
+    不把 http(s) 地址直接交给 SnowLuma：它的 HTTP 下载失败（如 400）会让
+    整条合并转发报错，而本地缓存文件它可以直接 stat。
+    """
+    if not url:
+        return None
+    url = str(url).strip().replace("&amp;", "&")
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    digest = hashlib.md5(url.encode("utf-8")).hexdigest()
+    os.makedirs(_IMAGE_CACHE_DIR, exist_ok=True)
+    for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        cached = os.path.abspath(os.path.join(_IMAGE_CACHE_DIR, digest + ext))
+        if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+            return cached
+    if url in _IMAGE_DOWNLOAD_FAILED:
+        return None
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/*,*/*;q=0.8",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        blob = response.content
+    except Exception:
+        _IMAGE_DOWNLOAD_FAILED.add(url)
+        return None
+    if not blob:
+        _IMAGE_DOWNLOAD_FAILED.add(url)
+        return None
+    ext = _guess_image_ext(blob, response.headers.get("Content-Type", ""))
+    path = os.path.abspath(os.path.join(_IMAGE_CACHE_DIR, digest + ext))
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(blob)
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    return path
+
+
+def _resolve_image_file(value):
+    """把 [OP:image,...] / [CQ:image,...] 或裸 file 值归一化成可发送的字符串。
+
+    优先级：base64 → 本机存在的路径（补全为绝对路径）→ 插件下载远程图到本地缓存。
+    返回 None 表示这张图无法发送，调用方应跳过，避免整条合并转发失败。
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.startswith("base64://"):
+        return text
+    if text.startswith(("http://", "https://")):
+        return _download_image_to_cache(text)
+
+    file_match = re.search(r"(?:^|,)\s*file=([^,\]]+)", text)
+    if file_match:
+        file_value = file_match.group(1).strip()
+    elif "file=" not in text and not text.startswith("["):
+        file_value = text
+    else:
+        file_value = ""
+
+    url_match = re.search(r"(?:^|,)\s*url=([^,\]]+)", text)
+    url_value = url_match.group(1).strip() if url_match else ""
+
+    if file_value.startswith("base64://"):
+        return file_value
+    if file_value.startswith(("http://", "https://")):
+        return _download_image_to_cache(file_value)
+    if file_value.lower().startswith("file://"):
+        file_value = _strip_file_scheme(file_value)
+
+    local_path = _find_local_image(file_value)
+    if local_path:
+        return local_path
+
+    if url_value.startswith(("http://", "https://")):
+        return _download_image_to_cache(url_value)
+    return None
+
+
+def _image_segment_from_text(segment_text):
+    """从图片段文本构造 OneBot image 段；无法解析时返回 None。"""
+    file_value = _resolve_image_file(segment_text)
+    if not file_value:
+        return None
+    return {"type": "image", "data": {"file": file_value}}
+
+
 def send_forward_message(bot_port, bot_token, group_id, nodes_data):
     url = f"http://127.0.0.1:{bot_port}/get_login_info"
     headers = {"Authorization": f"Bearer {bot_token}"}
@@ -10352,6 +10718,14 @@ def send_forward_message(bot_port, bot_token, group_id, nodes_data):
                 child_node = build_node(item)
                 if child_node:
                     processed_content.append(child_node)
+            elif isinstance(item, dict) and item.get("type") == "image":
+                resolved = _resolve_image_file(
+                    (item.get("data") or {}).get("file", "")
+                )
+                if resolved:
+                    processed_content.append(
+                        {"type": "image", "data": {"file": resolved}}
+                    )
             else:
                 processed_content.append(item)
         return {
@@ -10474,12 +10848,9 @@ def sendletters(playname):
                 text_parts = re.split(r"(\[(?:CQ|OP):image[^\]]+\])", signature)
                 for part in text_parts:
                     if part.startswith("[CQ:image") or part.startswith("[OP:image"):
-                        file_match = re.search(r"file=([^,\]]+)", part)
-                        if file_match:
-                            file_value = file_match.group(1)
-                            segments.append(
-                                {"type": "image", "data": {"file": file_value}}
-                            )
+                        image_segment = _image_segment_from_text(part)
+                        if image_segment:
+                            segments.append(image_segment)
                     elif part:
                         segments.append({"type": "text", "data": {"text": part}})
             else:

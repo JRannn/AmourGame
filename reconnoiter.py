@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 import multiprocessing
 
-caidian = "机缘将至！"  # 踩点的指令名，修改记得重载
+caidian = "。踩点"  # 踩点的指令名，修改记得重载
 qiyu = "运势显现！"  # 触发奇遇的指令名，修改记得重载
 admin_list = [
     "3149790940",
