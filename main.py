@@ -7380,6 +7380,13 @@ def reply(plugin_event, Proc, is_group):
             )
         result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
+            flat_nodes = _flatten_forward_nodes(nodes_data)
+            if flat_nodes and flat_nodes != nodes_data:
+                time.sleep(1)
+                result = send_forward_message(
+                    bot_port, bot_token, groupid, flat_nodes
+                )
+        if result.get("retcode") != 0:
             plugin_event.reply(
                 f"合并转发消息请求失败，请联系骰主：{result.get('message', '未知错误')}"
             )
@@ -10685,6 +10692,24 @@ def _image_segment_from_text(segment_text):
     if not file_value:
         return None
     return {"type": "image", "data": {"file": file_value}}
+
+
+def _flatten_forward_nodes(nodes):
+    """把嵌套的合并转发节点展开成单层；非嵌套节点原样保留。"""
+    flat = []
+    for node in nodes:
+        content = node.get("content_list")
+        if (
+            isinstance(content, list)
+            and content
+            and all(
+                isinstance(item, dict) and "bot_id" in item for item in content
+            )
+        ):
+            flat.extend(content)
+        else:
+            flat.append(node)
+    return flat
 
 
 def send_forward_message(bot_port, bot_token, group_id, nodes_data):
