@@ -35,7 +35,7 @@ amourlock = threading.Lock()
 monitor_lock = threading.Lock()
 plugin_events_cache = []
 schedule_started = False
-CURRENT_VERSION = "V2.2.1"
+CURRENT_VERSION = "V2.3.0"
 UPDATE_COMMAND = "更新恋综插件"
 GITHUB_REPO = "JRannn/AmourGame"
 UPDATE_SYNC_LOCK = threading.Lock()
@@ -10689,33 +10689,41 @@ def _image_segment_from_text(segment_text):
     return {"type": "image", "data": {"file": file_value}}
 
 
-FORWARD_SPLIT_MAX_ATTEMPTS = 5
+FORWARD_SPLIT_MAX_SUCCESS = 5
 
 
 def _send_forward_with_split(bot_port, bot_token, group_id, nodes, state=None):
-    """先整条发送；失败就对半拆开重发，最多尝试 FORWARD_SPLIT_MAX_ATTEMPTS 次。"""
+    """先整条发送；失败就对半拆开重发；最多成功发出 FORWARD_SPLIT_MAX_SUCCESS 条。"""
     if state is None:
-        state = {"attempts": 0}
+        state = {"sent": 0}
     if not nodes:
         return {"retcode": 0}
-    if state["attempts"] >= FORWARD_SPLIT_MAX_ATTEMPTS:
+    if state["sent"] >= FORWARD_SPLIT_MAX_SUCCESS:
         return {
             "retcode": -1,
-            "message": f"合并转发拆分重试已达{FORWARD_SPLIT_MAX_ATTEMPTS}次仍未成功",
+            "message": (
+                f"已成功发送{FORWARD_SPLIT_MAX_SUCCESS}条合并转发，"
+                "剩余内容未发送"
+            ),
         }
-    state["attempts"] += 1
     result = send_forward_message(bot_port, bot_token, group_id, nodes)
-    if result.get("retcode") == 0 or len(nodes) <= 1:
+    if result.get("retcode") == 0:
+        state["sent"] += 1
+        return result
+    if len(nodes) <= 1:
         return result
     mid = len(nodes) // 2
     first_error = None
     for half in (nodes[:mid], nodes[mid:]):
         if not half:
             continue
-        if state["attempts"] >= FORWARD_SPLIT_MAX_ATTEMPTS:
+        if state["sent"] >= FORWARD_SPLIT_MAX_SUCCESS:
             return {
                 "retcode": -1,
-                "message": f"合并转发拆分重试已达{FORWARD_SPLIT_MAX_ATTEMPTS}次仍未成功",
+                "message": (
+                    f"已成功发送{FORWARD_SPLIT_MAX_SUCCESS}条合并转发，"
+                    "剩余内容未发送"
+                ),
             }
         time.sleep(1)
         half_result = _send_forward_with_split(
