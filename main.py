@@ -7378,14 +7378,7 @@ def reply(plugin_event, Proc, is_group):
                     "content_list": section_nodes,
                 }
             )
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
-        if result.get("retcode") != 0:
-            flat_nodes = _flatten_forward_nodes(nodes_data)
-            if flat_nodes and flat_nodes != nodes_data:
-                time.sleep(1)
-                result = send_forward_message(
-                    bot_port, bot_token, groupid, flat_nodes
-                )
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
             plugin_event.reply(
                 f"合并转发消息请求失败，请联系骰主：{result.get('message', '未知错误')}"
@@ -7795,7 +7788,9 @@ def reply(plugin_event, Proc, is_group):
             if not nodes_data:
                 plugin_event.reply(f"恋综「{playname}」暂无任何{collection_item}内容！")
                 return
-            result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+            result = _send_forward_with_split(
+                bot_port, bot_token, groupid, nodes_data
+            )
             if result.get("retcode") != 0:
                 plugin_event.reply(
                     f"合并转发消息发送失败，请联系骰主：{result.get('message', '未知错误')}"
@@ -10694,22 +10689,41 @@ def _image_segment_from_text(segment_text):
     return {"type": "image", "data": {"file": file_value}}
 
 
-def _flatten_forward_nodes(nodes):
-    """把嵌套的合并转发节点展开成单层；非嵌套节点原样保留。"""
-    flat = []
-    for node in nodes:
-        content = node.get("content_list")
-        if (
-            isinstance(content, list)
-            and content
-            and all(
-                isinstance(item, dict) and "bot_id" in item for item in content
-            )
-        ):
-            flat.extend(content)
-        else:
-            flat.append(node)
-    return flat
+FORWARD_SPLIT_MAX_ATTEMPTS = 5
+
+
+def _send_forward_with_split(bot_port, bot_token, group_id, nodes, state=None):
+    """先整条发送；失败就对半拆开重发，最多尝试 FORWARD_SPLIT_MAX_ATTEMPTS 次。"""
+    if state is None:
+        state = {"attempts": 0}
+    if not nodes:
+        return {"retcode": 0}
+    if state["attempts"] >= FORWARD_SPLIT_MAX_ATTEMPTS:
+        return {
+            "retcode": -1,
+            "message": f"合并转发拆分重试已达{FORWARD_SPLIT_MAX_ATTEMPTS}次仍未成功",
+        }
+    state["attempts"] += 1
+    result = send_forward_message(bot_port, bot_token, group_id, nodes)
+    if result.get("retcode") == 0 or len(nodes) <= 1:
+        return result
+    mid = len(nodes) // 2
+    first_error = None
+    for half in (nodes[:mid], nodes[mid:]):
+        if not half:
+            continue
+        if state["attempts"] >= FORWARD_SPLIT_MAX_ATTEMPTS:
+            return {
+                "retcode": -1,
+                "message": f"合并转发拆分重试已达{FORWARD_SPLIT_MAX_ATTEMPTS}次仍未成功",
+            }
+        time.sleep(1)
+        half_result = _send_forward_with_split(
+            bot_port, bot_token, group_id, half, state
+        )
+        if half_result.get("retcode") != 0 and first_error is None:
+            first_error = half_result
+    return first_error or {"retcode": 0}
 
 
 def send_forward_message(bot_port, bot_token, group_id, nodes_data):
