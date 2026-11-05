@@ -1141,6 +1141,56 @@ def vtor(playname):
         return None
 
 
+def _relation_member_name(info):
+    if not isinstance(info, dict):
+        return ""
+    return str(info.get("嘉宾姓名") or info.get("NPC姓名") or "").strip()
+
+
+def _relation_name_to_uid(guests, name):
+    for member_uid, info in guests.items():
+        if _relation_member_name(info) == name:
+            return str(member_uid), info
+    return None, None
+
+
+def _relation_confirm_key(uid1, uid2):
+    return "-".join(sorted([str(uid1), str(uid2)]))
+
+
+def _relation_confirm_text(confirms, uid1, uid2):
+    if not uid1 or not uid2:
+        return "—— 待确认 ——"
+    pair = confirms.get(_relation_confirm_key(uid1, uid2))
+    if not isinstance(pair, dict):
+        return "—— 待确认 ——"
+    entries = [item for item in pair.values() if isinstance(item, dict)]
+    if len(entries) >= 2:
+        return "—— 双方确认 ——"
+    if len(entries) == 1:
+        name = str(entries[0].get("name") or "").strip()
+        return f"—— 单方确认：{name} ——" if name else "—— 单方确认 ——"
+    return "—— 待确认 ——"
+
+
+def _find_relation_playname(privategroup, uid, groupid, target_name):
+    candidates = []
+    for playname, guests in privategroup.items():
+        info = guests.get(uid)
+        if not isinstance(info, dict):
+            continue
+        groups = {
+            str(info.get("个人群号") or ""),
+            str(info.get("NPC群号") or ""),
+        }
+        if str(groupid) not in groups:
+            continue
+        target_uid, _ = _relation_name_to_uid(guests, target_name)
+        if target_uid:
+            candidates.append(playname)
+    return candidates
+
+
 def reply(plugin_event, Proc, is_group):
     message = plugin_event.data.message
     groupid = str(plugin_event.data.group_id)
@@ -1518,6 +1568,20 @@ def reply(plugin_event, Proc, is_group):
                     return
                 if not current_guest_name:
                     return
+                confirms = {}
+                try:
+                    confirms = getData(
+                        "relation", f"{replace_playname}_confirm.json"
+                    )
+                except:
+                    confirms = {}
+                if not isinstance(confirms, dict):
+                    confirms = {}
+                name_to_uid = {}
+                for member_uid, member_info in privategroup[replace_playname].items():
+                    member_name = _relation_member_name(member_info)
+                    if member_name:
+                        name_to_uid[member_name] = member_uid
                 user_relations = {}
                 for relation_key, relation_contents in relation_data.items():
                     if "→" in relation_key:
@@ -1559,6 +1623,18 @@ def reply(plugin_event, Proc, is_group):
                             )
                     if not nodes_data:
                         continue
+                    nodes_data.append(
+                        {
+                            "bot_id": bot_id,
+                            "content_text": _relation_confirm_text(
+                                confirms,
+                                name_to_uid.get(
+                                    str(current_guest_name).strip()
+                                ),
+                                name_to_uid.get(str(other_party).strip()),
+                            ),
+                        }
+                    )
                     result = send_forward_message(
                         bot_port, bot_token, groupid, nodes_data
                     )
@@ -2063,6 +2139,78 @@ def reply(plugin_event, Proc, is_group):
                     f"NPC录入\n恋综名称：{playname}\nNPC姓名：\nNPC皮相："
                 )
             return
+        return
+
+    elif re.fullmatch(r"确认关系线\s*(.+)", str(message).strip()):
+        target_name = re.fullmatch(
+            r"确认关系线\s*(.+)", str(message).strip()
+        ).group(1).strip()
+        privategroup = getData("groupcollection", "privategroup.json")
+        candidates = _find_relation_playname(
+            privategroup, uid, groupid, target_name
+        )
+        if not candidates:
+            plugin_event.reply(
+                "未找到你所在的恋综，或对方不是本恋综的嘉宾/NPC，无法确认关系线。"
+            )
+            return
+        if len(candidates) > 1:
+            plugin_event.reply("你同时在多个恋综中，请联系管理确认。")
+            return
+        playname = candidates[0]
+        target_uid, target_info = _relation_name_to_uid(
+            privategroup[playname], target_name
+        )
+        if not target_uid:
+            plugin_event.reply(f"未找到「{target_name}」，无法确认关系线。")
+            return
+        if target_uid == str(uid):
+            plugin_event.reply("不能确认自己噢！")
+            return
+        sender_name = _relation_member_name(privategroup[playname].get(uid))
+        if not sender_name:
+            plugin_event.reply("你还没有在该恋综登记，无法确认关系线。")
+            return
+        confirm_file = f"{playname}_confirm.json"
+        confirms = getData("relation", confirm_file)
+        if not isinstance(confirms, dict):
+            confirms = {}
+        pair_key = _relation_confirm_key(uid, target_uid)
+        pair = confirms.get(pair_key)
+        if not isinstance(pair, dict):
+            pair = {}
+        if str(uid) in pair:
+            if target_uid in pair:
+                plugin_event.reply(f"你和{target_name}已经双方确认了。")
+            else:
+                plugin_event.reply("你已经确认过了，等待对方确认。")
+            return
+        pair[str(uid)] = {
+            "name": sender_name,
+            "confirmed_at": int(time.time()),
+        }
+        confirms[pair_key] = pair
+        setData("relation", confirm_file, confirms)
+        is_mutual = target_uid in pair
+        if is_mutual:
+            plugin_event.reply(f"你和{target_name}的关系线已双方确认。")
+        else:
+            plugin_event.reply(f"已确认你和{target_name}的关系线，等待对方确认。")
+        target_group_id = target_info.get("个人群号") or target_info.get(
+            "NPC群号"
+        )
+        if target_group_id:
+            if is_mutual:
+                notification = f"{sender_name} 和你已双方确认关系线。"
+            else:
+                notification = (
+                    f"{sender_name} 确认了和你的关系线。\n"
+                    f"回复「确认关系线 {sender_name}」即可完成双方确认。"
+                )
+            try:
+                plugin_event.send("group", target_group_id, notification)
+            except Exception:
+                pass
         return
 
     elif re.match(
@@ -7092,6 +7240,22 @@ def reply(plugin_event, Proc, is_group):
                 player2_groupid = user_data.get("个人群号") or user_data.get("NPC群号")
         del relation_data[relation_key]
         setData("relation", f"{playname}.json", relation_data)
+        if player1_uid and player2_uid:
+            try:
+                confirms = getData("relation", f"{playname}_confirm.json")
+                if isinstance(confirms, dict):
+                    confirm_key = _relation_confirm_key(
+                        player1_uid, player2_uid
+                    )
+                    if confirm_key in confirms:
+                        del confirms[confirm_key]
+                        setData(
+                            "relation",
+                            f"{playname}_confirm.json",
+                            confirms,
+                        )
+            except Exception:
+                pass
         notification_sent = False
         if player1_groupid:
             try:
@@ -7201,6 +7365,7 @@ def reply(plugin_event, Proc, is_group):
                 f"<{replace_playname}·点歌>\n歌曲：\n留言：（可为空）\n署名：（可为空）\n\n【说明】\n点歌方式1：\n自动搜索，默认发送结果列表的第一首歌。\n「歌曲：」栏可通过「歌名 歌手」的格式控制结果，用空格隔开，如果点歌失败，把歌手删了只写歌名。\n\n点歌方式2：\n引用音乐卡片消息，附文表格。\n\n点歌只发表格，把后面这些删了。",
                 collection_formats,
                 f"<{replace_playname}·关系线>\n发送者：{replace_guest_name}\n接收者：\n内容：\n\n【说明】\n发送「关系线@骰子」可查看关系线合集。",
+                f"确认关系线 对方姓名\n\n【说明】\n在自己个人群发送，确认与对方的关系线；单方确认后对方再发一次即双方确认。确认后继续发送关系线即为续写，截止后仍可确认。",
                 f"<{replace_playname}·留言板bot>\n留言人：（可为空）\n接收人：（可为空）\n内容：",
                 f"{replace_playname} 送图\n{replace_sender} 致 {replace_receiver}\n内容：\n署名：\n\n【注意】\n必须附带图片，支持发送原图；恋综日程期间不可送图。\n若对方已将骰子退群，则无法收到图片噢！\n如果没有回执，把图片放在「署名：」栏文本之后。",
                 f"删除时间线\n\n发送「拒绝+类型+编号」即可释放双方时间线。\n多人群如需一键删除，请联系管理在后台使用专属指令删除。",
@@ -7300,7 +7465,7 @@ def reply(plugin_event, Proc, is_group):
             f"{replace_playname}设置收集项 公知 收集内容2 收集内容3\n\n【说明】\n设置本场恋综可上传的收集项，即使不填写公知也会自动开启公知收集。\n本指令会覆盖当前收集项；想保留的项目每次都要写上，未写的项目会被关闭。\n关闭不会删除已上传内容，但关闭期间无法通过查看指令查看或上传；重新开启后可继续查看原内容。",
             f"{collection_view_text}\n{collection_random_text}\n\n【说明】\n在后台群发送查看指令，可查看对应收集项合集与收集进度。\n在后台群发送随机编号指令，可匿名随机编号并显示姓名对应关系；如已录入性别则自动按性别分组。\n除公知外，其他收集项仅后台可查看。",
             f"{collection_delete_text}\n\n【说明】\nxxx为嘉宾/NPC姓名。",
-            f"{replace_playname} 删除关系线 张三 李四\n\n【说明】\n空格隔开。",
+            f"{replace_playname} 删除关系线 张三 李四\n\n【说明】\n空格隔开。\n\n确认关系线 对方姓名\n\n【说明】\n在自己个人群发送。单方确认后对方再发一次即双方确认；确认后继续发关系线即为续写，截止后仍可确认。",
             f"{replace_playname} 关系线截止日期 20260101",
             f"{replace_playname} 通知受邀者 开启/关闭\n\n【注意】\n本功能默认关闭，需要手动开启。",
             f"{replace_playname} Dx补戏（x为数字）",
@@ -9281,6 +9446,16 @@ def reply(plugin_event, Proc, is_group):
             try:
                 os.remove(f"./plugin/data/amourgame/relation/{playname}.json")
                 os.remove(f"./plugin/data/amourgame/relation/{playname}.json.bak")
+                success_count += 1
+            except:
+                error_count += 1
+            try:
+                os.remove(
+                    f"./plugin/data/amourgame/relation/{playname}_confirm.json"
+                )
+                os.remove(
+                    f"./plugin/data/amourgame/relation/{playname}_confirm.json.bak"
+                )
                 success_count += 1
             except:
                 error_count += 1
