@@ -35,7 +35,7 @@ amourlock = threading.Lock()
 monitor_lock = threading.Lock()
 plugin_events_cache = []
 schedule_started = False
-CURRENT_VERSION = "V2.3.1"
+CURRENT_VERSION = "V2.3.2"
 UPDATE_COMMAND = "更新恋综插件"
 GITHUB_REPO = "JRannn/AmourGame"
 UPDATE_SYNC_LOCK = threading.Lock()
@@ -1525,19 +1525,13 @@ def reply(plugin_event, Proc, is_group):
                         nodes_data.append(
                             {"bot_id": bot_id, "content_list": letter["segments"]}
                         )
-                    result = send_forward_message(
+                    result = _send_forward_with_split(
                         bot_port, bot_token, groupid, nodes_data
                     )
                     if result.get("retcode") != 0:
-                        for letter in player_letters:
-                            message_text = (
-                                f"{replace_playname} 心动信\n"
-                                f"致 {letter['recver_name']}\n"
-                                f"内容：{letter['content']}\n"
-                                f"署名：{letter['signature']}"
-                            )
-                            plugin_event.reply(message_text)
-                            time.sleep(0.5)
+                        plugin_event.reply(
+                            f"合并转发消息发送失败，请联系骰主：{result.get('message', '未知错误')}"
+                        )
                 else:
                     plugin_event.reply("你今天还没有发送心动信。")
                 return
@@ -1635,7 +1629,7 @@ def reply(plugin_event, Proc, is_group):
                             ),
                         }
                     )
-                    result = send_forward_message(
+                    result = _send_forward_with_split(
                         bot_port, bot_token, groupid, nodes_data
                     )
                     if result.get("retcode") != 0:
@@ -2355,7 +2349,7 @@ def reply(plugin_event, Proc, is_group):
                 else:
                     header_text = relation_contents[key]
                 nodes_data.append({"bot_id": bot_id, "content_text": header_text})
-            result = send_forward_message(
+            result = _send_forward_with_split(
                 bot_port, bot_token, receiver_group_id, nodes_data
             )
             if result.get("retcode") != 0:
@@ -5688,19 +5682,11 @@ def reply(plugin_event, Proc, is_group):
                 f"地点：{wish['location']}"
             )
             nodes_data.append({"bot_id": bot_id, "content_text": wish_content})
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
-            plugin_event.reply("合并转发失败，请联系骰主处理。")
-            for wish in playname_wishes:
-                wish_msg = (
-                    f"编号：{wish['id']}\n"
-                    f"内容：{wish['content']}\n"
-                    f"署名：{wish['author']}\n"
-                    f"时间：{wish['time']}\n"
-                    f"地点：{wish['location']}\n"
-                )
-                plugin_event.reply(wish_msg)
-                time.sleep(0.5)
+            plugin_event.reply(
+                f"合并转发消息发送失败，请联系骰主：{result.get('message', '未知错误')}"
+            )
 
     elif re.match(
         r"^(.+?)\s*个人群列表$",
@@ -5769,7 +5755,7 @@ def reply(plugin_event, Proc, is_group):
             if total_all == 0:
                 plugin_event.reply(f"恋综「{playname}」暂无个人群数据。")
                 return
-            result = send_forward_message(
+            result = _send_forward_with_split(
                 bot_port, bot_token, current_group, nodes_data
             )
             if result.get("retcode") != 0:
@@ -6124,7 +6110,7 @@ def reply(plugin_event, Proc, is_group):
             target_name = guest_name
             plugin_event.reply(f"没有找到{target_name}在{playname}的时间线数据噢！")
             return
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
             plugin_event.reply(
                 f"发送合并转发消息失败，错误信息：{result.get('message', '未知错误')}。请联系骰主。"
@@ -6249,7 +6235,7 @@ def reply(plugin_event, Proc, is_group):
             target_name = host_name if host_name != uid else sender
             plugin_event.reply(f"没有找到{target_name}在{playname}的时间线数据噢！")
             return
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
             plugin_event.reply(
                 f"发送合并转发消息失败，错误信息：{result.get('message', '未知错误')}。请联系骰主。"
@@ -6667,7 +6653,7 @@ def reply(plugin_event, Proc, is_group):
                     f"{user_name}在恋综「{playname}」中暂无任何互动记录。"
                 )
                 return
-            result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+            result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
             if result.get("retcode") != 0:
                 plugin_event.reply(
                     f"合并转发消息构造失败，{result.get('message', '未知错误')}"
@@ -7012,7 +6998,7 @@ def reply(plugin_event, Proc, is_group):
             if not nodes_data:
                 plugin_event.reply(f"恋综「{playname}」的所有嘉宾均无互动记录。")
                 return
-            result = send_forward_message(
+            result = _send_forward_with_split(
                 bot_port, bot_token, current_group, nodes_data
             )
             if result.get("retcode") != 0:
@@ -7374,7 +7360,7 @@ def reply(plugin_event, Proc, is_group):
             ]
             for text in format_texts:
                 nodes_data.append({"bot_id": bot_id, "content_text": text})
-            result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+            result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
             if result.get("retcode") != 0:
                 plugin_event.reply(
                     f"合并转发消息请求失败，请联系骰主：{result.get('message', '未知错误')}"
@@ -7818,7 +7804,7 @@ def reply(plugin_event, Proc, is_group):
                     nodes_data.append(
                         _build_numbered_node(bot_id, idx, e["content"], e["image"])
                     )
-            result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+            result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
             if result.get("retcode") != 0:
                 plugin_event.reply(
                     f"合并转发消息发送失败，请联系骰主：{result.get('message', '未知错误')}"
@@ -8248,7 +8234,7 @@ def reply(plugin_event, Proc, is_group):
         for place_name, place_desc in sorted_places:
             place_node_text = f"{place_name}\n\n{place_desc}"
             nodes_data.append({"bot_id": bot_id, "content_text": place_node_text})
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
             if len(sorted_places) <= 5:
                 place_list_text = "\n".join(
@@ -8454,7 +8440,7 @@ def reply(plugin_event, Proc, is_group):
                 nodes_data.append(
                     {"bot_id": bot_id, "content_text": content_text.strip()}
                 )
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
             summary = f"恋综「{playname}」日程\n\n"
             for day_key in sorted_days[:5]:  # 只显示前5个
@@ -9968,7 +9954,7 @@ def reply(plugin_event, Proc, is_group):
                 if len(kick_failed) > 20:
                     kick_summary += f"\n等{len(kick_failed)}人"
             nodes_data.append({"bot_id": bot_id, "content_text": kick_summary})
-        result = send_forward_message(bot_port, bot_token, groupid, nodes_data)
+        result = _send_forward_with_split(bot_port, bot_token, groupid, nodes_data)
         if result.get("retcode") != 0:
             reply_msg = (
                 f"恋综「{playname}」空闲小群{action}完成。\n"
@@ -11104,25 +11090,15 @@ def sendletters(playname):
                         "content_list": letter["segments"],
                     }
                 )
-            result = send_forward_message(bot_port, bot_token, group_id, nodes_data)
-            if result.get("retcode") == 0:
-                pass
-            else:
+            result = _send_forward_with_split(bot_port, bot_token, group_id, nodes_data)
+            if result.get("retcode") != 0:
                 manage_group = None
                 if playname in register and "manage_group" in register[playname]:
                     manage_group = register[playname]["manage_group"]
-                for letter in letters_list:
-                    message = (
-                        f"{playname} 心动信\n"
-                        f"致 {recver_name}\n"
-                        f"内容：{letter['content']}\n"
-                        f"署名：{letter['signature']}"
-                    )
-                    plugin_event.send("group", group_id, message)
                 if manage_group:
                     notification = (
-                        f"恋综「{playname}」的嘉宾{recver_name}信件合并转发消息构造失败，"
-                        f"已转为普通发送，请检查收信情况与代码异常。"
+                        f"恋综「{playname}」的嘉宾{recver_name}信件合并转发发送失败："
+                        f"{result.get('message', '未知错误')}"
                     )
                     plugin_event.send("group", manage_group, notification)
         else:

@@ -343,7 +343,7 @@ def _monitor_query_records(
         plugin_event.reply(f"恋综「{playname}」没有找到你参与的{day_text}戏录。")
         return
     for start in range(0, len(outer_nodes), 40):
-        result = core.send_forward_message(
+        result = core._send_forward_with_split(
             bot_port,
             bot_token,
             plugin_event.data.group_id,
@@ -506,7 +506,7 @@ def _monitor_auto_replay(plugin_event, groupid, bot_port, bot_token):
         for item in messages
     ]
     for start in range(0, len(message_nodes), 99):
-        result = core.send_forward_message(
+        result = core._send_forward_with_split(
             bot_port,
             bot_token,
             groupid,
